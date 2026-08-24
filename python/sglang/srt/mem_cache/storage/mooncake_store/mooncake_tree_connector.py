@@ -521,7 +521,9 @@ class MooncakeTreeConnector(UnifiedTreeConnector):
     def num_completed_offloads(self) -> int:
         return self.offload_results.qsize()
 
-    def pop_completed_offload(self) -> bool:
+    def pop_completed_offload(self, *, block: bool = False) -> bool:
+        if block:
+            return self.offload_results.get()
         return self.offload_results.get_nowait()
 
     def reset(self) -> None:

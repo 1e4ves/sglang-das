@@ -20,6 +20,7 @@ intersection, IO outcome agreement) is decided on the tree side, here.
 from __future__ import annotations
 
 import hashlib
+import logging
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, NamedTuple, Optional, Sequence
 
@@ -44,6 +45,9 @@ if TYPE_CHECKING:
     from sglang.srt.mem_cache.cache_init_params import CacheInitParams
     from sglang.srt.mem_cache.unified_radix_cache import UnifiedTreeNode
     from sglang.srt.server_args import ServerArgs
+
+
+logger = logging.getLogger(__name__)
 
 
 class UnifiedTreeConnector(ABC):
@@ -90,8 +94,13 @@ class UnifiedTreeConnector(ABC):
         """Return the number of completed offloads waiting to be consumed."""
 
     @abstractmethod
-    def pop_completed_offload(self) -> bool:
-        """Consume the oldest completed offload and return its result."""
+    def pop_completed_offload(self, *, block: bool = False) -> bool:
+        """Consume the oldest offload result.
+
+        ``block`` is used by downstream pipeline stages after PP0 has committed
+        to draining an operation. Those stages must wait for the corresponding
+        local IO instead of advancing their tree independently.
+        """
 
     def reset(self) -> None:
         pass
@@ -110,6 +119,14 @@ class ConnectorMarker(NamedTuple):
     key: RadixKey
     keys: list[str]
     device_hit_len: int
+
+
+class ConnectorOffload(NamedTuple):
+    """A logical offload present in the same FIFO position on every rank."""
+
+    node: UnifiedTreeNode
+    lock_params: object
+    queued: bool
 
 
 class UnifiedCacheConnectorMixin:
@@ -139,26 +156,48 @@ class UnifiedCacheConnectorMixin:
     ) -> MatchResult:
         page = self.page_size
         device_hit_len = int(result.device_indices.numel())
+
+        # Every stage must make the same early-return decision. A mismatch here
+        # means the L1 trees have already diverged; failing together is safer
+        # than letting only a subset of stages enter the lookup collective.
+        lengths = torch.tensor([device_hit_len, -device_hit_len], dtype=torch.int)
+        self._all_reduce_connector_groups(lengths, torch.distributed.ReduceOp.MIN)
+        min_device_hit_len = int(lengths[0].item())
+        max_device_hit_len = -int(lengths[1].item())
+        if min_device_hit_len != max_device_hit_len:
+            raise RuntimeError(
+                "Unified tree connector L1 prefix diverged across cache ranks: "
+                f"min={min_device_hit_len}, max={max_device_hit_len}."
+            )
         if device_hit_len >= len(key):
             return result
 
         keys = self._connector_tail_keys(key, result, device_hit_len)
-        if not keys:
+        transfers = []
+        if keys:
+            for component in self._components_tuple:
+                transfer = component.build_connector_transfer(
+                    ConnectorTransferPhase.LOOKUP,
+                    keys=keys,
+                )
+                if transfer is None:
+                    break
+                transfers.append(transfer)
+
+        local_prepared = bool(keys) and len(transfers) == len(self._components_tuple)
+        if not self._connector_sync_success(local_prepared):
             return result
 
-        transfers = []
-        for component in self._components_tuple:
-            transfer = component.build_connector_transfer(
-                ConnectorTransferPhase.LOOKUP,
-                keys=keys,
-            )
-            if transfer is None:
-                return result
-            transfers.append(transfer)
-
         # Tail-relative: page 0 of `keys` is the first uncached page.
+        try:
+            valid_pages = self.connector.lookup(req.rid, transfers)
+        except Exception:
+            # Keep the collective sequence intact. The empty local result makes
+            # the global intersection a miss on every rank.
+            logger.exception("Unified tree connector lookup failed for rid=%s", req.rid)
+            valid_pages = []
         hit_pages = self._sync_connector_hit_pages(
-            self.connector.lookup(req.rid, transfers),
+            valid_pages,
             num_pages=len(keys),
             device_hit_pages=0,
         )
@@ -185,7 +224,7 @@ class UnifiedCacheConnectorMixin:
         for pages in valid_pages:
             if device_hit_pages < pages <= num_pages:
                 mask[pages] = 1
-        self._all_reduce_attn_groups(mask, torch.distributed.ReduceOp.MIN)
+        self._all_reduce_connector_groups(mask, torch.distributed.ReduceOp.MIN)
         common = mask.nonzero()
         if common.numel() == 0:
             return 0
@@ -229,8 +268,12 @@ class UnifiedCacheConnectorMixin:
     def load_connector(self, req: Req) -> tuple[torch.Tensor, UnifiedTreeNode]:
         empty = self._empty_match_result.device_indices
         marker = self._connector_markers.pop(req.rid, None)
-        if marker is None:
+        has_marker = self._connector_sync_success(marker is not None)
+        if not has_marker:
+            req.host_hit_length = 0
+            req.storage_hit_length = 0
             return empty, req.last_node
+        assert marker is not None
 
         device_hit_len = marker.device_hit_len
         tail_keys = marker.keys
@@ -265,7 +308,13 @@ class UnifiedCacheConnectorMixin:
         assert full.name == PoolName.KV
 
         transfers = [transfer for _, transfer in component_transfers]
-        local_success = self.connector.load(req.rid, transfers)
+        try:
+            local_success = self.connector.load(req.rid, transfers)
+        except Exception:
+            logger.exception(
+                "Unified tree connector load prepare failed for rid=%s", req.rid
+            )
+            local_success = False
         success = self._connector_sync_success(local_success)
         if local_success and not success:
             self.connector.cancel_queued_load(req.rid)
@@ -382,7 +431,19 @@ class UnifiedCacheConnectorMixin:
                 transfers_to_load.append(transfer)
 
         self.connector.cancel_queued_load(rid)
-        if transfers_to_load and not self.connector.load(rid, transfers_to_load):
+        try:
+            local_success = not transfers_to_load or self.connector.load(
+                rid, transfers_to_load
+            )
+        except Exception:
+            logger.exception(
+                "Unified tree connector load requeue failed for rid=%s", rid
+            )
+            local_success = False
+        success = self._connector_sync_success(local_success)
+        if local_success and not success:
+            self.connector.cancel_queued_load(rid)
+        if not success:
             raise RuntimeError(
                 f"Failed to requeue canonical connector load for {rid=}."
             )
@@ -433,39 +494,73 @@ class UnifiedCacheConnectorMixin:
             if transfer is not None:
                 transfers.append(transfer)
 
+        local_prepared = len(transfers) == len(self._components_tuple)
         lock_params = self.inc_lock_ref(node).to_dec_params()
+        queued = False
         try:
-            queued = self.connector.offload(transfers)
-        except BaseException:
-            self.dec_lock_ref(node, lock_params)
-            raise
-        if not queued:
-            self.dec_lock_ref(node, lock_params)
-            return
+            if local_prepared:
+                queued = self.connector.offload(transfers)
+        except Exception:
+            # This rank still contributes a failure at the same FIFO position,
+            # so peers never wait forever for a result that cannot arrive.
+            logger.exception("Unified tree connector offload enqueue failed")
 
         node.connector_offloaded = True
-        self.connector_offloads.append((node, lock_params))
+        self.connector_offloads.append(
+            ConnectorOffload(node=node, lock_params=lock_params, queued=queued)
+        )
+
+    def _completed_connector_offload_prefix(self) -> int:
+        """Count the locally-ready prefix, including synthetic enqueue failures."""
+        ready_results = self.connector.num_completed_offloads()
+        ready_prefix = 0
+        for pending in self.connector_offloads:
+            if pending.queued:
+                if ready_results == 0:
+                    break
+                ready_results -= 1
+            ready_prefix += 1
+        return ready_prefix
 
     def drain_connector_offloads(self) -> None:
         if self.connector is None:
             return
 
-        local_count = min(
-            self.connector.num_completed_offloads(), len(self.connector_offloads)
-        )
+        # Bound the previous round's one-way PP sends before reusing the tag.
+        self._drain_connector_pp_work()
+
+        local_count = self._completed_connector_offload_prefix()
         finish_count = torch.tensor([local_count], dtype=torch.int, device="cpu")
-        self._all_reduce_attn_groups(
+        # Only PP0 decides how many logical operations commit this round. Other
+        # stages consume exactly that many and block for slower local IO.
+        self._sync_connector_pp0(
             finish_count,
             torch.distributed.ReduceOp.MIN,
         )
         common_count = int(finish_count.item())
 
-        local_successes = [
-            self.connector.pop_completed_offload() for _ in range(common_count)
-        ]
+        if common_count == 0:
+            return
+
+        has_pending = torch.tensor(
+            [int(common_count <= len(self.connector_offloads))], dtype=torch.int
+        )
+        self._all_reduce_connector_groups(has_pending, torch.distributed.ReduceOp.MIN)
+        if not bool(has_pending.item()):
+            raise RuntimeError(
+                "Unified tree connector offload FIFO diverged across pipeline ranks."
+            )
+
+        local_successes = []
+        for pending in self.connector_offloads[:common_count]:
+            local_successes.append(
+                self.connector.pop_completed_offload(block=True)
+                if pending.queued
+                else False
+            )
         if local_successes:
             successes = torch.tensor(local_successes, dtype=torch.int, device="cpu")
-            self._all_reduce_attn_groups(
+            self._all_reduce_connector_groups(
                 successes,
                 torch.distributed.ReduceOp.MIN,
             )
@@ -474,14 +569,14 @@ class UnifiedCacheConnectorMixin:
             global_successes = []
 
         for success in global_successes:
-            node, lock_params = self.connector_offloads.pop(0)
+            node, lock_params, _ = self.connector_offloads.pop(0)
             node.connector_offloaded = success
             self.dec_lock_ref(node, lock_params)
 
     def _connector_sync_success(self, success: bool) -> bool:
         """MIN-reduce a per-rank IO outcome so every rank takes the same branch."""
         synced = torch.tensor([int(success)], dtype=torch.int)
-        self._all_reduce_attn_groups(synced, torch.distributed.ReduceOp.MIN)
+        self._all_reduce_connector_groups(synced, torch.distributed.ReduceOp.MIN)
         return bool(synced.item())
 
     # ---- lifecycle helpers used by the tree's own hooks ----

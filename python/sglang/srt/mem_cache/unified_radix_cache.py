@@ -255,6 +255,10 @@ class UnifiedRadixCache(UnifiedCacheConnectorMixin, BasePrefixCache):
         self.tp_group = params.tp_cache_group
         self.attn_cp_group = params.attn_cp_cache_group
         self.attn_tp_group = params.attn_tp_cache_group
+        self.pp_group = params.pp_cache_group
+        self.pp_rank = params.pp_rank
+        self.pp_size = params.pp_size
+        self.connector_pp_work_list: list[torch.distributed.Work] = []
         self.tp_world_size = (
             1
             if self.tp_group is None
@@ -277,6 +281,45 @@ class UnifiedRadixCache(UnifiedCacheConnectorMixin, BasePrefixCache):
                 reduced = True
         if not reduced and self.tp_world_size > 1:
             torch.distributed.all_reduce(tensor, op=op, group=self.tp_group)
+
+    def _all_reduce_connector_groups(self, tensor: torch.Tensor, op) -> None:
+        """Reduce a connector result across every cache-sharding dimension."""
+        self._all_reduce_attn_groups(tensor, op)
+        if self.pp_group is not None and self.pp_size > 1:
+            torch.distributed.all_reduce(tensor, op=op, group=self.pp_group)
+
+    def _sync_connector_pp0(self, tensor: torch.Tensor, op) -> None:
+        """Let PP0 reduce its TP/CP replicas, then forward its decision."""
+        if self.pp_rank == 0:
+            self._all_reduce_attn_groups(tensor, op)
+        self._connector_pp_sync(tensor)
+
+    def _connector_pp_sync(self, tensor: torch.Tensor) -> None:
+        if self.pp_size <= 1 or self.pp_group is None:
+            return
+
+        if self.pp_rank > 0:
+            torch.distributed.recv(
+                tensor,
+                group_src=self.pp_rank - 1,
+                group=self.pp_group,
+                tag=2,
+            )
+
+        if self.pp_rank + 1 < self.pp_size:
+            send_buffer = tensor.clone()
+            work = torch.distributed.isend(
+                send_buffer,
+                group_dst=self.pp_rank + 1,
+                group=self.pp_group,
+                tag=2,
+            )
+            self.connector_pp_work_list.append(work)
+
+    def _drain_connector_pp_work(self) -> None:
+        for work in self.connector_pp_work_list:
+            work.wait()
+        self.connector_pp_work_list.clear()
 
     def reset(self) -> None:
         self._reset_full()
@@ -1522,7 +1565,7 @@ class UnifiedRadixCache(UnifiedCacheConnectorMixin, BasePrefixCache):
         if (
             self.connector is not None
             and params.req is not None
-            and params.req.rid in self._connector_markers
+            and params.host_hit_length > 0
         ):
             return self.load_connector(params.req)
 
