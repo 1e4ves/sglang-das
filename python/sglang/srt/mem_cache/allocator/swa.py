@@ -354,42 +354,22 @@ class SWATokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         if free_index.numel() == 0:
             return
 
-        if not self.is_not_in_free_group:
-            self.swa_free_group.append(self._copy_for_free_group(free_index))
-            return
-
         if self.page_size == 1:
             mapping_indices = free_index
         else:
             mapping_indices = self._expand_to_full_pages(free_index)
 
-        mapping = self.full_to_swa_index_mapping
-        swa_indices = mapping[mapping_indices]
+        swa_indices = self.full_to_swa_index_mapping[mapping_indices]
         swa_indices = swa_indices[swa_indices > 0]
-        if swa_indices.numel() == 0:
-            self.clear_full_to_swa_mapping(mapping_indices)
+        self.clear_full_to_swa_mapping(mapping_indices)
+
+        if not self.is_not_in_free_group:
+            # Resolve ownership now. A cache action later in this group may
+            # install a new mapping for the same full index.
+            self.swa_free_group.append(swa_indices)
             return
 
-        # HCU keeps the stricter release path: dedupe, skip pages already on the
-        # free list, and clear *every* full index that mapped into a freed SWA
-        # page. Upstream frees `swa_indices` directly and clears only
-        # `mapping_indices`, which for page_size > 1 can double-free a page shared
-        # by several full tokens and leaves stale full->SWA entries behind.
-        unique_swa = torch.unique(swa_indices)
-        page_size = self.swa_attn_allocator.page_size
-        freed_swa_pages = torch.unique(unique_swa // page_size)
-        if len(self.swa_attn_allocator.release_pages) > 0:
-            self.swa_attn_allocator.merge_and_sort_free()
-        already_free = torch.isin(
-            unique_swa // page_size, self.swa_attn_allocator.free_pages
-        )
-        unique_swa = unique_swa[~already_free]
-        if unique_swa.numel() > 0:
-            self.swa_attn_allocator.free(unique_swa)
-
-        all_swa_pages = mapping // page_size
-        stale = torch.isin(all_swa_pages, freed_swa_pages) & (mapping > 0)
-        mapping[stale] = 0
+        self.swa_attn_allocator.free(swa_indices)
 
     def free_group_begin(self):
         super().free_group_begin()
@@ -400,7 +380,7 @@ class SWATokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         if self.swa_free_group:
             swa_free_group = self.swa_free_group
             self.swa_free_group = []
-            self.free_swa(torch.cat(swa_free_group))
+            self.swa_attn_allocator.free(torch.cat(swa_free_group))
 
     def _expand_to_full_pages(self, indices: torch.Tensor) -> torch.Tensor:
         pages = torch.unique(indices // self.page_size)
