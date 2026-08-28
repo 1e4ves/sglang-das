@@ -23,7 +23,7 @@ from sglang.srt.mem_cache.hicache_storage import (
 from sglang.srt.mem_cache.unified_cache.cache_action import (
     FreeComponentDeviceSlot,
     FreeComponentHostSlot,
-    FreeDeviceKV,
+    FreeDeviceKVFullOnly,
     RebuildFullToSWAMapping,
     RecoverSWAWithLockedFull,
     SWARebuild,
@@ -309,7 +309,7 @@ class SWAComponent(TreeComponent):
                 total_prefix_len + prefix_len,
             )
             full_cd.value = value_slice.clone()
-            cache_actions.append(FreeDeviceKV([old_full]))
+            cache_actions.append(FreeDeviceKVFullOnly([old_full]))
             cache_actions.append(SWARebuild(node.id, value_slice))
             return 0
         elif swa_evicted_seqlen < total_prefix_len + prefix_len:
@@ -337,7 +337,7 @@ class SWAComponent(TreeComponent):
                 total_prefix_len + prefix_len,
             )
             node.component_data[BASE_COMPONENT_TYPE].value = new_full.clone()
-            cache_actions.append(FreeDeviceKV([old_full]))
+            cache_actions.append(FreeDeviceKVFullOnly([old_full]))
             cache_actions.append(SWARebuild(node.id, new_full))
             return start_idx
         else:
@@ -1288,7 +1288,7 @@ class SWAComponent(TreeComponent):
             swa_value = self._translate_full_to_swa(action.incoming_full)
             alloc.set_full_to_swa_mapping(action.kept_full, swa_value)
             alloc.clear_full_to_swa_mapping(action.incoming_full)
-            alloc.full_attn_allocator.free(action.incoming_full)
+            alloc.free_full(action.incoming_full)
             self.tree_core.set_component_device_value(
                 action.node_id, self.component_type, swa_value
             )
