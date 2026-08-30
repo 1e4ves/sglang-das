@@ -1205,7 +1205,7 @@ class UnifiedRadixCacheSuite:
         kv_len = len(input_ids) + len(output_ids)
         kv_indices = self._alloc(allocator, kv_len)
         req_to_token_pool.write((req.req_pool_idx, slice(0, kv_len)), kv_indices)
-        req.kv_committed_len = kv_len
+        req.kv.kv_committed_len = kv_len
         req.last_node = cache.root_node_handle()
         req.kv.cache_protected_len = 0
         req.swa_uuid_for_lock = None
@@ -1245,7 +1245,7 @@ class UnifiedRadixCacheSuite:
         kv_len = req.extend_range.end
         kv_indices = self._alloc(allocator, kv_len)
         req_to_token_pool.write((req.req_pool_idx, slice(0, kv_len)), kv_indices)
-        req.kv_committed_len = kv_len
+        req.kv.kv_committed_len = kv_len
         req.kv.kv_allocated_len = kv_len
         req.last_node = cache.root_node_handle()
         req.kv.cache_protected_len = 0
@@ -1290,7 +1290,7 @@ class UnifiedRadixCacheSuite:
         kv_len = len(tokens)
         kv_indices = self._alloc(allocator, kv_len)
         req_to_token_pool.write((req.req_pool_idx, slice(0, kv_len)), kv_indices)
-        req.kv_committed_len = kv_len
+        req.kv.kv_committed_len = kv_len
         req.last_node = cache.root_node_handle()
         req.kv.cache_protected_len = 0
         req.swa_uuid_for_lock = None
@@ -1325,7 +1325,7 @@ class UnifiedRadixCacheSuite:
         kv_len = len(tokens)
         kv_indices = self._alloc(allocator, kv_len)
         req_to_token_pool.write((req.req_pool_idx, slice(0, kv_len)), kv_indices)
-        req.kv_committed_len = kv_len
+        req.kv.kv_committed_len = kv_len
         req.last_node = cache.root_node_handle()
         req.kv.cache_protected_len = 0
         req.swa_uuid_for_lock = None
@@ -1362,7 +1362,7 @@ class UnifiedRadixCacheSuite:
         req.set_extend_range(0, len(req.full_untruncated_fill_ids))
         kv_indices = self._alloc(allocator, len(tokens))
         req_to_token_pool.write((req.req_pool_idx, slice(0, len(tokens))), kv_indices)
-        req.kv_committed_len = len(tokens)
+        req.kv.kv_committed_len = len(tokens)
         req.last_node = cache.root_node_handle()
         req.kv.cache_protected_len = 0
         req.swa_uuid_for_lock = None
@@ -1464,7 +1464,7 @@ class UnifiedRadixCacheSuite:
         kv_len = len(input_ids)
         kv_indices = self._alloc(allocator, kv_len)
         req_to_token_pool.write((req.req_pool_idx, slice(0, kv_len)), kv_indices)
-        req.kv_committed_len = kv_len
+        req.kv.kv_committed_len = kv_len
         req.last_node = cache.root_node_handle()
         req.kv.cache_protected_len = 0
         req.swa_uuid_for_lock = None
@@ -1589,7 +1589,7 @@ class UnifiedRadixCacheSuite:
         kv_len = len(tokens)
         fresh_value = self._alloc(allocator, kv_len)
         req_to_token_pool.write((req.req_pool_idx, slice(0, kv_len)), fresh_value)
-        req.kv_committed_len = kv_len
+        req.kv.kv_committed_len = kv_len
         req.last_node = cache.root_node_handle()
         req.kv.cache_protected_len = 0
         req.swa_uuid_for_lock = None
@@ -2176,7 +2176,7 @@ class UnifiedRadixCacheSuite:
         req.set_extend_range(0, len(req.full_untruncated_fill_ids))
         kv_indices = self._alloc(allocator, pre_len)
         req_to_token_pool.write((req.req_pool_idx, slice(0, pre_len)), kv_indices)
-        req.kv_committed_len = pre_len
+        req.kv.kv_committed_len = pre_len
         req.last_node = cache.root_node_handle()
         req.kv.cache_protected_len = 0
         req.swa_uuid_for_lock = None
@@ -2265,7 +2265,7 @@ class UnifiedRadixCacheSuite:
         req.set_extend_range(0, len(req.full_untruncated_fill_ids))
         kv_indices = self._alloc(allocator, pre_len)
         req_to_token_pool.write((req.req_pool_idx, slice(0, pre_len)), kv_indices)
-        req.kv_committed_len = pre_len
+        req.kv.kv_committed_len = pre_len
         req.last_node = cache.root_node_handle()
         req.kv.cache_protected_len = 0
         req.swa_uuid_for_lock = None
@@ -6408,7 +6408,7 @@ class TestUnifiedRadixCacheInt8MambaCheckpoint(CustomTestCase):
         )
         req_to_token_pool.alloc([req])
         req.output_ids = array("q")
-        req.kv_committed_len = len(tokens)
+        req.kv.kv_committed_len = len(tokens)
         req.kv.kv_allocated_len = len(tokens)
         req.kv.cache_protected_len = 0
         req.swa_uuid_for_lock = None
@@ -7735,7 +7735,7 @@ class TestSWAWindowUnderBigramKey(CustomTestCase):
         req.set_extend_range(0, len(req.full_untruncated_fill_ids))
         kv_indices = self._alloc_paged(allocator, seq_len)
         req_to_token_pool.write((req.req_pool_idx, slice(0, seq_len)), kv_indices)
-        req.kv_committed_len = seq_len
+        req.kv.kv_committed_len = seq_len
         req.last_node = cache.root_node_handle()
         req.kv.cache_protected_len = 0
         req.swa_uuid_for_lock = None
