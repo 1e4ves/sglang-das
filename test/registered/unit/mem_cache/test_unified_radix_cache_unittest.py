@@ -1207,7 +1207,7 @@ class UnifiedRadixCacheSuite:
         req_to_token_pool.write((req.req_pool_idx, slice(0, kv_len)), kv_indices)
         req.kv_committed_len = kv_len
         req.last_node = cache.root_node_handle()
-        req.cache_protected_len = 0
+        req.kv.cache_protected_len = 0
         req.swa_uuid_for_lock = None
         req.extra_key = None
         req.full_untruncated_fill_ids = array("q", input_ids + output_ids)
@@ -1248,7 +1248,7 @@ class UnifiedRadixCacheSuite:
         req.kv_committed_len = kv_len
         req.kv.kv_allocated_len = kv_len
         req.last_node = cache.root_node_handle()
-        req.cache_protected_len = 0
+        req.kv.cache_protected_len = 0
         req.swa_uuid_for_lock = None
         req.extra_key = None
         if self.cfg.has_mamba:
@@ -1292,7 +1292,7 @@ class UnifiedRadixCacheSuite:
         req_to_token_pool.write((req.req_pool_idx, slice(0, kv_len)), kv_indices)
         req.kv_committed_len = kv_len
         req.last_node = cache.root_node_handle()
-        req.cache_protected_len = 0
+        req.kv.cache_protected_len = 0
         req.swa_uuid_for_lock = None
         req.swa_prefix_lock_released = True
         req.extra_key = None
@@ -1327,7 +1327,7 @@ class UnifiedRadixCacheSuite:
         req_to_token_pool.write((req.req_pool_idx, slice(0, kv_len)), kv_indices)
         req.kv_committed_len = kv_len
         req.last_node = cache.root_node_handle()
-        req.cache_protected_len = 0
+        req.kv.cache_protected_len = 0
         req.swa_uuid_for_lock = None
         req.extra_key = None
         if self.cfg.has_mamba:
@@ -1336,7 +1336,7 @@ class UnifiedRadixCacheSuite:
         cache.cache_unfinished_req(req)
 
         self.assertGreater(len(req.prefix_indices), 0)
-        self.assertEqual(req.cache_protected_len, len(req.prefix_indices))
+        self.assertEqual(req.kv.cache_protected_len, len(req.prefix_indices))
         self.assertIsNotNone(req.last_node)
         self.assertFalse(req.swa_prefix_lock_released)
 
@@ -1364,7 +1364,7 @@ class UnifiedRadixCacheSuite:
         req_to_token_pool.write((req.req_pool_idx, slice(0, len(tokens))), kv_indices)
         req.kv_committed_len = len(tokens)
         req.last_node = cache.root_node_handle()
-        req.cache_protected_len = 0
+        req.kv.cache_protected_len = 0
         req.swa_uuid_for_lock = None
         req.extra_key = None
         req.kv.swa_evicted_seqlen = evicted_len
@@ -1466,7 +1466,7 @@ class UnifiedRadixCacheSuite:
         req_to_token_pool.write((req.req_pool_idx, slice(0, kv_len)), kv_indices)
         req.kv_committed_len = kv_len
         req.last_node = cache.root_node_handle()
-        req.cache_protected_len = 0
+        req.kv.cache_protected_len = 0
         req.swa_uuid_for_lock = None
         req.extra_key = None
         req.full_untruncated_fill_ids = array("q", input_ids)
@@ -1591,7 +1591,7 @@ class UnifiedRadixCacheSuite:
         req_to_token_pool.write((req.req_pool_idx, slice(0, kv_len)), fresh_value)
         req.kv_committed_len = kv_len
         req.last_node = cache.root_node_handle()
-        req.cache_protected_len = 0
+        req.kv.cache_protected_len = 0
         req.swa_uuid_for_lock = None
         req.extra_key = None
         req.kv.swa_evicted_seqlen = 0
@@ -1618,7 +1618,7 @@ class UnifiedRadixCacheSuite:
                 swa_value,
             )
         )
-        self.assertEqual(req.cache_protected_len, len(tokens))
+        self.assertEqual(req.kv.cache_protected_len, len(tokens))
 
         cache.dec_lock_ref(
             req.last_node,
@@ -2178,7 +2178,7 @@ class UnifiedRadixCacheSuite:
         req_to_token_pool.write((req.req_pool_idx, slice(0, pre_len)), kv_indices)
         req.kv_committed_len = pre_len
         req.last_node = cache.root_node_handle()
-        req.cache_protected_len = 0
+        req.kv.cache_protected_len = 0
         req.swa_uuid_for_lock = None
         req.extra_key = None
 
@@ -2267,7 +2267,7 @@ class UnifiedRadixCacheSuite:
         req_to_token_pool.write((req.req_pool_idx, slice(0, pre_len)), kv_indices)
         req.kv_committed_len = pre_len
         req.last_node = cache.root_node_handle()
-        req.cache_protected_len = 0
+        req.kv.cache_protected_len = 0
         req.swa_uuid_for_lock = None
         req.extra_key = None
 
@@ -6410,7 +6410,7 @@ class TestUnifiedRadixCacheInt8MambaCheckpoint(CustomTestCase):
         req.output_ids = array("q")
         req.kv_committed_len = len(tokens)
         req.kv.kv_allocated_len = len(tokens)
-        req.cache_protected_len = 0
+        req.kv.cache_protected_len = 0
         req.swa_uuid_for_lock = None
         req.extra_key = None
         req.mamba_last_track_seqlen = len(tokens)
@@ -7737,7 +7737,7 @@ class TestSWAWindowUnderBigramKey(CustomTestCase):
         req_to_token_pool.write((req.req_pool_idx, slice(0, seq_len)), kv_indices)
         req.kv_committed_len = seq_len
         req.last_node = cache.root_node_handle()
-        req.cache_protected_len = 0
+        req.kv.cache_protected_len = 0
         req.swa_uuid_for_lock = None
         req.extra_key = None
 
@@ -7753,7 +7753,7 @@ class TestSWAWindowUnderBigramKey(CustomTestCase):
             f"{self.cfg.sliding_window_size} window",
         )
         self.assertEqual(
-            req.cache_protected_len,
+            req.kv.cache_protected_len,
             boundary,
             "the match after the insert must reach the leaf the insert created",
         )
