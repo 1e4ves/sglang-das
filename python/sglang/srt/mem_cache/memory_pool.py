@@ -306,7 +306,7 @@ class ReqToTokenPool:
     def alloc(self, reqs: list[Req]) -> Optional[List[int]]:
         # Indices of reqs that already have a req_pool_idx and will reuse
         # their existing slot (e.g. chunked prefill continuing across chunks).
-        reusing = [i for i, r in enumerate(reqs) if r.req_pool_idx is not None]
+        reusing = [i for i, r in enumerate(reqs) if r.kv.req_pool_idx is not None]
         # NOTE: this check is relaxed temporarily
         # https://github.com/sgl-project/sglang/pull/20476
         # if not any(r.is_dllm() for r in reqs):
@@ -331,16 +331,16 @@ class ReqToTokenPool:
             select_index = []
         offset = 0
         for r in reqs:
-            if r.req_pool_idx is None:
-                r.req_pool_idx = select_index[offset]
-                self.req_generation[r.req_pool_idx] += 1
+            if r.kv.req_pool_idx is None:
+                r.kv.req_pool_idx = select_index[offset]
+                self.req_generation[r.kv.req_pool_idx] += 1
                 offset += 1
-        return [r.req_pool_idx for r in reqs]
+        return [r.kv.req_pool_idx for r in reqs]
 
     def free(self, req: Req):
-        assert req.req_pool_idx is not None, "request must have req_pool_idx"
-        self.free_slots.append(req.req_pool_idx)
-        req.req_pool_idx = None
+        assert req.kv.req_pool_idx is not None, "request must have req_pool_idx"
+        self.free_slots.append(req.kv.req_pool_idx)
+        req.kv.req_pool_idx = None
 
     def clear(self):
         self.free_slots = list(range(1, self._alloc_size))
@@ -1578,7 +1578,7 @@ class HybridReqToTokenPool(ReqToTokenPool):
         set_mamba_track_indices_from_reqs reads correct slot indices.
         """
         req.mamba_ping_pong_track_buffer[idx] = value
-        self.req_index_to_mamba_ping_pong_track_buffer_mapping[req.req_pool_idx] = (
+        self.req_index_to_mamba_ping_pong_track_buffer_mapping[req.kv.req_pool_idx] = (
             req.mamba_ping_pong_track_buffer
         )
 
@@ -1615,7 +1615,9 @@ class HybridReqToTokenPool(ReqToTokenPool):
 
         if self.enable_mamba_extra_buffer:
             mamba_ping_pong_track_buffer_to_free = (
-                self.req_index_to_mamba_ping_pong_track_buffer_mapping[req.req_pool_idx]
+                self.req_index_to_mamba_ping_pong_track_buffer_mapping[
+                    req.kv.req_pool_idx
+                ]
             )
             if mamba_ping_pong_track_buffer_to_keep is not None:
                 assert mamba_ping_pong_track_buffer_to_keep in [
