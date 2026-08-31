@@ -308,10 +308,7 @@ def alloc_for_extend(
 
     reuse_kv = None
     if batch.is_dllm():
-        reuse_kv = [
-            r.kv.req_pool_idx is not None and bool(r.dllm_incomplete_ids)
-            for r in batch.reqs
-        ]
+        reuse_kv = [r.kv.holds_kv and bool(r.dllm_incomplete_ids) for r in batch.reqs]
 
     # Create tensors for allocation
     prefix_lens_cpu = torch.tensor(batch.prefix_lens, dtype=torch.int64)
