@@ -163,11 +163,10 @@ class TestTombstonesDoNotCrossTheBus(unittest.TestCase):
 class TestFreeSegment(unittest.TestCase):
     """Mirrors `test_paged_free_segment.TestFreeSegment`."""
 
-    def test_matches_unique_over_alignments(self):
-        """Sweep (start, end) so segments cover aligned/unaligned head and
-        tail, a single partial page, and the full row."""
+    def test_matches_unique_over_tail_alignments(self):
+        """Page-aligned starts against every tail alignment."""
         for num_tokens in (1, PAGE_SIZE, PAGE_SIZE + 1, 3 * PAGE_SIZE - 1):
-            for start in range(0, num_tokens, max(1, num_tokens // 4)):
+            for start in range(0, num_tokens, PAGE_SIZE):
                 for end in (start + 1, num_tokens):
                     if end <= start:
                         continue
@@ -185,7 +184,7 @@ class TestFreeSegment(unittest.TestCase):
     def test_never_calls_unique(self):
         """The decisive check -- make `torch.unique` explode. A textual guard
         can be fooled; this cannot."""
-        for start in (0, 1, PAGE_SIZE - 1, PAGE_SIZE, PAGE_SIZE + 3):
+        for start in (0, PAGE_SIZE, 2 * PAGE_SIZE):
             alloc = _paged_allocator(lazy=True)
             row = alloc.alloc(3 * PAGE_SIZE)
             with self.subTest(start_pos=start):
@@ -193,6 +192,12 @@ class TestFreeSegment(unittest.TestCase):
                     torch, "unique", side_effect=AssertionError("sync path taken")
                 ):
                     alloc.free_segment(row[start : start + PAGE_SIZE], start_pos=start)
+
+    def test_unaligned_start_is_rejected(self):
+        alloc = _paged_allocator(lazy=True)
+        row = alloc.alloc(3 * PAGE_SIZE)
+        with self.assertRaises(AssertionError):
+            alloc.free_segment(row[1 : PAGE_SIZE + 1], start_pos=1)
 
     def test_empty_segment_is_noop(self):
         alloc = _paged_allocator(lazy=True)
@@ -241,9 +246,7 @@ class TestFreeGroupKeepsPositions(unittest.TestCase):
         row = alloc.alloc(3 * PAGE_SIZE)
         alloc.free_group_begin()
         alloc.free_segment(row[:PAGE_SIZE], start_pos=0)
-        alloc.free_segment(
-            row[PAGE_SIZE + 3 : 2 * PAGE_SIZE + 3], start_pos=PAGE_SIZE + 3
-        )
+        alloc.free_segment(row[PAGE_SIZE : 2 * PAGE_SIZE + 3], start_pos=PAGE_SIZE)
         with mock.patch.object(
             torch, "unique", side_effect=AssertionError("sync path taken")
         ):
