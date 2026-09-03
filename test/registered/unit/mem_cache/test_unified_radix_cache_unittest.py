@@ -938,7 +938,6 @@ class TestUnifiedRadixCacheEagleHiCacheStorageKey(CustomTestCase):
         )
 
         pipeline = BufferModePipeline.__new__(BufferModePipeline)
-        pipeline.anchor_lock_enabled = True
         pipeline.anchor_locks = {}
         pipeline.anchor_locked_tokens_ = 0
         pipeline.anchor_lock_cap_tokens = 10_000
@@ -3761,9 +3760,6 @@ class UnifiedRadixCacheSuite:
         if self.cfg.components != (ComponentType.FULL,) or self.cfg.page_size != 4:
             self.skipTest("one FULL page_size=4 fixture covers namespace routing")
 
-        anchor_lock = envs.SGLANG_ENABLE_HICACHE_BUFFER_ANCHOR_LOCK.override(True)
-        anchor_lock.__enter__()
-        self.addCleanup(anchor_lock.__exit__, None, None, None)
         storage_dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, storage_dir, ignore_errors=True)
 
@@ -3971,9 +3967,6 @@ class UnifiedRadixCacheSuite:
         # the retained per-fixture device memory stays bounded.
         if self.cfg.page_size != 1 or self.cfg.sliding_window_size != 4:
             self.skipTest("requires page_size=1, sliding_window_size=4")
-        cm = envs.SGLANG_ENABLE_HICACHE_BUFFER_ANCHOR_LOCK.override(True)
-        cm.__enter__()
-        self.addCleanup(cm.__exit__, None, None, None)
         storage_dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, storage_dir, ignore_errors=True)
         from sglang.srt.mem_cache.swa_memory_pool import SWAKVPool
@@ -9196,7 +9189,6 @@ class TestAnchorLockOutcomePolicy(CustomTestCase):
         from sglang.srt.mem_cache.buffer_mode.pipeline import BufferModePipeline
 
         pipeline = BufferModePipeline.__new__(BufferModePipeline)
-        pipeline.anchor_lock_enabled = True
         pipeline.anchor_locks = {}
         pipeline.anchor_locked_tokens_ = 0
         pipeline.anchor_lock_cap_tokens = cap_tokens
