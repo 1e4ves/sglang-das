@@ -305,5 +305,25 @@ class TestEveryUnifiedAllocatorOverridesFreeSegment(unittest.TestCase):
                 self.assertIn("free_page_reps_group", inspect.getsource(cls))
 
 
+class TestUnifiedSwaFullSideGroup(unittest.TestCase):
+    """`free_full` inside a free group must defer and land at `free_group_end`;
+    the composite carries that pile itself, not through the SWA parent's hooks."""
+
+    def test_full_only_frees_defer_until_group_end(self):
+        from test_unified_swa_shared_virtual_ids import _build
+
+        alloc = _build(64, 32, 2, 4)
+        idx = alloc.alloc(8)
+        alloc.free_swa(idx)
+        before = alloc.full_available_size()
+
+        alloc.free_group_begin()
+        alloc.free_full(idx[:4])
+        alloc.free_full_segment(idx[4:], start_pos=4)
+        self.assertEqual(alloc.full_available_size(), before)
+        alloc.free_group_end()
+        self.assertEqual(alloc.full_available_size(), before + 8)
+
+
 if __name__ == "__main__":
     unittest.main()
