@@ -942,6 +942,10 @@ class Req(ReqDllmMixin):
         # For req-level memory management
         self.kv = ReqKvInfo()
 
+        # Full-KV-derived boundary whose SWA window should be inserted after
+        # the current prefill pass.
+        self.swa_branching_seqlen: Optional[int] = None
+
         # for cross-encoder model
         self.token_type_ids = token_type_ids
 
@@ -1420,6 +1424,7 @@ class Req(ReqDllmMixin):
                 self.best_match_node,
                 self.host_hit_length,
                 self.swa_host_hit_length,
+                self.swa_branching_seqlen,
                 self.mamba_host_hit_length,
                 self.mamba_branching_seqlen,
             ) = (
@@ -1429,6 +1434,7 @@ class Req(ReqDllmMixin):
                 match_result.best_match_node,
                 match_result.host_hit_length,
                 match_result.swa_host_hit_length,
+                match_result.swa_branching_seqlen,
                 match_result.mamba_host_hit_length,
                 match_result.mamba_branching_seqlen,
             )
@@ -1727,6 +1733,7 @@ class Req(ReqDllmMixin):
         self.num_matched_prefix_tokens = 0
         self.swa_uuid_for_lock = None
         self.swa_prefix_lock_released = False
+        self.swa_branching_seqlen = None
         self.skip_lock_node_ids = {}
         self.extend_range = None
         self.dllm_initialized = False
