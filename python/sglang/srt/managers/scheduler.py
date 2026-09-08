@@ -1766,21 +1766,6 @@ class Scheduler(
             ]
         )
 
-    def _abort_on_running_timeout(self, running_batch: ScheduleBatch):
-        # NOTE: this should be called before a batch is launched.
-        timeout_s = envs.SGLANG_REQ_RUNNING_TIMEOUT.get()
-        if timeout_s <= 0:
-            return
-        if running_batch.is_empty():
-            return
-
-        deadline = time.perf_counter() - timeout_s
-        for req in running_batch.reqs:
-            if not req.finished() and 0 < req.time_stats.forward_entry_time < deadline:
-                req.to_finish = FINISH_ABORT(
-                    "Request running timeout reached.", HTTPStatus.SERVICE_UNAVAILABLE
-                )
-
     def get_init_info(self) -> Dict[str, Any]:
         """Return scheduler initialization info for handshake.
 
@@ -2173,6 +2158,7 @@ class Scheduler(
             stream_output=lambda *a, **kw: self.output_streamer.stream_output(*a, **kw),
             get_last_batch=lambda: self.last_batch,
             scripted_scheduler_hook=self.scripted_scheduler_hook,
+            poll_timeout_aborts=self._poll_timeout_aborts,
         )
 
     def get_pd_decode_step_context(self):
@@ -3065,33 +3051,58 @@ class Scheduler(
         req_to_abort.time_stats.trace_ctx.abort(abort_info={"reason": message})
         return req_to_abort.rid == recv_req.rid
 
-    def _abort_on_waiting_timeout(self):
-        if (timeout_s := envs.SGLANG_REQ_WAITING_TIMEOUT.get()) <= 0:
-            return
+    def _poll_timeout_aborts(self) -> List[AbortReq]:
+        """Emit aborts only; every rank must drop the same requests in the
+        same iteration, or the extend-vs-decode decision splits and the
+        collectives hang.
+        """
+        aborts: List[AbortReq] = []
 
-        deleted_reqs = set()
-        deadline = time.perf_counter() - timeout_s
-        for req in self.waiting_queue:
-            entry_time = req.time_stats.wait_queue_entry_time
-            if 0 < entry_time < deadline:
-                self._release_aborted_request(req.rid)
-                self.ipc_channels.send_to_tokenizer.send_output(
-                    _make_abort_req(
-                        req,
-                        finished_reason={
-                            "type": "abort",
-                            "status_code": HTTPStatus.SERVICE_UNAVAILABLE,
-                            "message": "Request waiting timeout reached.",
-                        },
-                    ),
-                    req,
-                )
-                deleted_reqs.add(req)
+        if (timeout_s := envs.SGLANG_REQ_WAITING_TIMEOUT.get()) > 0:
+            deadline = time.perf_counter() - timeout_s
+            for req in self.waiting_queue:
+                entry_time = req.time_stats.wait_queue_entry_time
+                if 0 < entry_time < deadline:
+                    aborts.append(
+                        AbortReq(
+                            rid=req.rid,
+                            abort_message="Request waiting timeout reached.",
+                            finished_reason={
+                                "type": "abort",
+                                "status_code": HTTPStatus.SERVICE_UNAVAILABLE,
+                                "message": "Request waiting timeout reached.",
+                            },
+                        )
+                    )
 
-        if deleted_reqs:
-            self.waiting_queue = [
-                req for req in self.waiting_queue if req not in deleted_reqs
-            ]
+        if (timeout_s := envs.SGLANG_REQ_RUNNING_TIMEOUT.get()) > 0:
+            deadline = time.perf_counter() - timeout_s
+            if self.ps.pp_size == 1:
+                inflight_batches = [self.running_batch, self.last_batch]
+            else:
+                inflight_batches = [*self.running_mbs, *self.mbs]
+            seen_rids = set()
+            for batch in inflight_batches:
+                if batch is None:
+                    continue
+                for req in batch.reqs:
+                    if req.rid in seen_rids or req.finished():
+                        continue
+                    seen_rids.add(req.rid)
+                    if 0 < req.time_stats.forward_entry_time < deadline:
+                        aborts.append(
+                            AbortReq(
+                                rid=req.rid,
+                                abort_message="Request running timeout reached.",
+                                finished_reason={
+                                    "type": "abort",
+                                    "status_code": HTTPStatus.SERVICE_UNAVAILABLE,
+                                    "message": "Request running timeout reached.",
+                                },
+                            )
+                        )
+
+        return aborts
 
     def handle_embedding_request(
         self,
@@ -3273,8 +3284,6 @@ class Scheduler(
 
         if self.enable_fpm:
             self._fpm_batch_t0 = time.monotonic()
-        self._abort_on_waiting_timeout()
-        self._abort_on_running_timeout(running_batch)
         if self.dllm_config is not None:
             self.dllm_manager.filter_finished_reqs()
 
@@ -4796,7 +4805,11 @@ class Scheduler(
             # We still need to send something back to TokenizerManager to clean up the state.
             req = self.waiting_queue.pop(i)
             self._release_aborted_request(req.rid)
-            self.ipc_channels.send_to_tokenizer.send_output(_make_abort_req(req), req)
+            # Without the initiator's reason the tokenizer falls back to a
+            # generic abort message.
+            self.ipc_channels.send_to_tokenizer.send_output(
+                _make_abort_req(req, finished_reason=recv_req.finished_reason), req
+            )
             # For disaggregation decode mode, the request in the waiting queue has KV cache allocated.
             if self.disaggregation_mode == DisaggregationMode.DECODE:
                 release_kv_cache(req, self.tree_cache)
@@ -4899,7 +4912,13 @@ class Scheduler(
                 # The request will still run one decode forward pass.
                 # Then we reuse all existing code to clean up the KV cache allocation.
                 logger.debug(f"Abort running request. {req.rid=}")
-                req.to_finish = FINISH_ABORT()
+                if recv_req.abort_message:
+                    # Timeout aborts carry an SLA message + 503 for the client.
+                    req.to_finish = FINISH_ABORT(
+                        recv_req.abort_message, HTTPStatus.SERVICE_UNAVAILABLE
+                    )
+                else:
+                    req.to_finish = FINISH_ABORT()
 
     def _pause_engine(self) -> Tuple[List[Req], int]:
         raise NotImplementedError()
