@@ -312,6 +312,8 @@ class DecodeRequest:
     prefix_match: Optional[DecodePrefixMatch] = None
     hicache_restored_kv_indices: Optional[torch.Tensor] = None
     hicache_restored_node: Any = None
+    # Receipt for the inc_lock_ref held on hicache_restored_node.
+    hicache_restore_lock_receipt: Optional[DecLockRefParams] = None
     hicache_load_consumer_index: int = -1
     hicache_restore_status: HiCacheRestoreResult = HiCacheRestoreResult.PENDING
 
@@ -424,15 +426,11 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
         )
 
     def _release_matched_prefix_lock(self, req: Req) -> None:
-        params = DecLockRefParams(
-            swa_uuid_for_lock=req.swa_uuid_for_lock,
-            skip_lock_node_ids=req.skip_lock_node_ids,
-        )
         if req.swa_prefix_lock_released:
-            self.tree_cache.dec_lock_ref(req.last_node, params, skip_swa=True)
+            self.tree_cache.dec_lock_ref(req.last_node, req.lock_receipt, skip_swa=True)
             req.swa_prefix_lock_released = False
         else:
-            self.tree_cache.dec_lock_ref(req.last_node, params)
+            self.tree_cache.dec_lock_ref(req.last_node, req.lock_receipt)
 
         # Capacity backpressure releases the match but keeps the request queued
         # for a later retry, which does not re-match. Anything that later walks
@@ -948,16 +946,12 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
                 cow_mamba=self.tree_cache.supports_mamba(),
                 include_req=True,
             )
-        # Always lock to match aggregated scheduling behavior. SWA locks only
-        # span the sliding window and return a boundary uuid; store it so the
-        # matching dec_lock_ref stops there instead of underflowing toward root.
-        lock_result = self.tree_cache.inc_lock_ref(result.last_device_node)
-        req.swa_uuid_for_lock = lock_result.swa_uuid_for_lock
-        # Release must mirror the exact nodes skipped at acquire time: the FULL
-        # component skips the evicted bottom segment, and a later insert (e.g.
-        # the DSV4 prompt donation) can revive those values before the matching
-        # dec, which would then decrement a lock_ref this request never took.
-        req.skip_lock_node_ids = lock_result.skip_lock_node_ids
+        # Keep aggregated scheduling semantics while preserving the SWA lock
+        # boundary needed for the matching dec_lock_ref; the full receipt
+        # travels on the req so every later release mirrors this acquire.
+        req.lock_receipt = self.tree_cache.inc_lock_ref(
+            result.last_device_node
+        ).to_dec_params()
         return self._build_decode_prefix_match(req, result)
 
     def _resolve_prefill_dp_rank(self, req: Req) -> Optional[int]:
@@ -1544,8 +1538,7 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
                     and hasattr(self.tree_cache, "dec_swa_lock_only")
                 ):
                     self.tree_cache.dec_swa_lock_only(
-                        decode_req.req.last_node,
-                        decode_req.req.swa_uuid_for_lock,
+                        decode_req.req.last_node, decode_req.req.lock_receipt
                     )
                     decode_req.req.swa_prefix_lock_released = True
 
