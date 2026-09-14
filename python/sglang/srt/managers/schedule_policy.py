@@ -878,7 +878,9 @@ class PrefillAdder:
         if req.retracted_stain:
             # Retraction attribution is intentionally omitted for now; discard
             # its lifecycle state so a later abort cannot report it as a drop.
-            self.tree_cache.discard_storage_prefetch_accounting(req.rid)
+            self.tree_cache.discard_storage_prefetch_accounting(
+                req.cache_request_handle
+            )
             return
 
         if prefix_len > 0:
@@ -903,7 +905,7 @@ class PrefillAdder:
                 else "shrunk"
             )
         self.tree_cache.finish_storage_prefetch_admission(
-            req.rid,
+            req.cache_request_handle,
             fulfilled_tokens=fulfilled_storage_hit,
             reason=reason,
         )
