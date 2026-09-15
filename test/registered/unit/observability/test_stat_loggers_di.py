@@ -217,6 +217,7 @@ class TestHiCacheMetrics(unittest.TestCase):
 
         collector.log_storage_prefetch_hit_tokens(21)
         collector.log_storage_prefetch_unfulfilled_tokens(4, "storage_transfer")
+        collector.log_storage_prefetch_deferred_tokens(7, "device_capacity")
 
         self.assertEqual(
             collector.storage_prefetch_hit_tokens_total.increments, [(labels, 21)]
@@ -224,6 +225,10 @@ class TestHiCacheMetrics(unittest.TestCase):
         self.assertEqual(
             collector.storage_prefetch_unfulfilled_tokens_total.increments,
             [({**labels, "reason": "storage_transfer"}, 4)],
+        )
+        self.assertEqual(
+            collector.storage_prefetch_deferred_tokens_total.increments,
+            [({**labels, "reason": "device_capacity"}, 7)],
         )
 
 
