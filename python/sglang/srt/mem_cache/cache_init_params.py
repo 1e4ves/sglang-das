@@ -27,7 +27,6 @@ class CacheInitParams:
     attn_tp_cache_group: Optional[torch.distributed.ProcessGroup] = None
     pp_cache_group: Optional[torch.distributed.ProcessGroup] = None
     eviction_policy: str = "lru"
-    disable_finished_insert: bool = False
 
     enable_metrics: bool = False
     enable_kv_cache_events: bool = False
