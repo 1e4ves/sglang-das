@@ -9442,13 +9442,20 @@ class ServerArgs:
                     "_handle_other_validations",
                     optimistic_prefill_attempts=0,
                 )
-            elif self.enable_hierarchical_cache and (
-                self.hicache_storage_backend is not None
-                or self.hicache_write_policy != "write_back"
+            elif self.enable_hierarchical_cache and not (
+                (
+                    self.hicache_storage_backend is None
+                    and self.hicache_write_policy == "write_back"
+                )
+                or (
+                    self.hicache_storage_backend is not None
+                    and self.hicache_host_memory_mode == "buffer_only"
+                    and self.hicache_write_policy == "write_through"
+                )
             ):
                 logger.warning(
-                    "Optimistic prefill only supports L2 hierarchical cache "
-                    "with write-back policy"
+                    "Optimistic prefill supports L2 write-back or L3 buffer-only "
+                    "write-through hierarchical cache"
                 )
                 self._declare(
                     "_handle_other_validations",

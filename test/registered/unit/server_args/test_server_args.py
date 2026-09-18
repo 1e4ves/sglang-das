@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import sglang.srt.server_args as server_args_module
 from sglang.srt.arg_groups import pd_disaggregation_hook
+from sglang.srt.arg_groups.overrides import resolution_result
 from sglang.srt.arg_groups.speculative_hook import handle_speculative_decoding
 from sglang.srt.entrypoints.sidecar import (
     SGLANG_GRPC_ENDPOINT_ENV,
@@ -1365,6 +1366,48 @@ class TestHiCacheArgs(unittest.TestCase):
         self.assertEqual(args.hicache_mem_layout, expected_mem_layout)
         if expected_decode_backend is not None:
             self.assertEqual(args.decode_attention_backend, expected_decode_backend)
+
+    def test_optimistic_prefill_allows_only_exercised_hicache_modes(self):
+        common = {
+            "enable_hierarchical_cache": True,
+            "disaggregation_mode": "prefill",
+            "optimistic_prefill_attempts": 3,
+        }
+        cases = [
+            ({"hicache_write_policy": "write_back"}, 3),
+            (
+                {
+                    "hicache_storage_backend": "file",
+                    "hicache_host_memory_mode": "buffer_only",
+                    "hicache_write_policy": "write_through",
+                },
+                3,
+            ),
+            ({"hicache_write_policy": "write_through"}, 0),
+            (
+                {
+                    "hicache_storage_backend": "file",
+                    "hicache_host_memory_mode": "cache",
+                    "hicache_write_policy": "write_through",
+                },
+                0,
+            ),
+            (
+                {
+                    "hicache_storage_backend": "file",
+                    "hicache_host_memory_mode": "buffer_only",
+                    "hicache_write_policy": "write_through_selective",
+                },
+                0,
+            ),
+        ]
+        for overrides, expected in cases:
+            with self.subTest(overrides=overrides):
+                args = ServerArgs(model_path="dummy", **common, **overrides)
+                args._handle_other_validations()
+                self.assertEqual(
+                    resolution_result(args, "optimistic_prefill_attempts"), expected
+                )
 
     def test_hicache_io_backend_and_mem_layout_compatibility(self):
         expected_kernel_layout = (
