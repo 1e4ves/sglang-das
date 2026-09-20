@@ -2968,6 +2968,12 @@ class ServerArgs:
         NS("memory"),
     ] = "mooncake"
 
+    enable_linker_mla_dedup: A[
+        bool,
+        "Load replicated MLA KV on rank 0 and broadcast each layer with the Mooncake linker.",
+        NS("memory"),
+    ] = False
+
     # -------------------------------------------------------------------------
     # Hierarchical sparse attention
     # -------------------------------------------------------------------------
@@ -8108,6 +8114,11 @@ class ServerArgs:
         1) Layout <-> I/O compatibility for direct conflicts.
         2) Storage <-> layout compatibility (may rewrite layout).
         """
+        if self.enable_linker_mla_dedup and (
+            not self.enable_unified_cache_external_linker
+            or self.unified_cache_external_linker_backend != "mooncake"
+        ):
+            raise ValueError("--enable-linker-mla-dedup requires the Mooncake linker.")
         if self.enable_unified_cache_external_linker:
             if self.enable_hierarchical_cache:
                 raise ValueError(
