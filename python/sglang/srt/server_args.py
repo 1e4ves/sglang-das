@@ -9461,15 +9461,6 @@ class ServerArgs:
                     "_handle_other_validations",
                     optimistic_prefill_attempts=0,
                 )
-            elif resolved_view(self).uses_mamba_radix_cache:
-                logger.warning(
-                    "Optimistic prefill does not support models that use "
-                    "mamba radix cache."
-                )
-                self._declare(
-                    "_handle_other_validations",
-                    optimistic_prefill_attempts=0,
-                )
 
         # Handle model inference tensor dump.
         if self.debug_tensor_dump_output_folder is not None:
