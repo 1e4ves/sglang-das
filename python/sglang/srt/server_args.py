@@ -6814,12 +6814,10 @@ class ServerArgs:
                 raise ValueError(flashinfer_error)
 
     def _handle_int8_mamba_checkpoint(self):
-        # The int8 mamba checkpoint pool is only wired into the built-in
-        # MambaRadixCache. The host-offload path (enabled by
-        # --enable-hierarchical-cache) and custom radix-cache backends are NOT
-        # int8-aware: they would read int8 checkpoint slots as bf16 active slots
-        # (wrong pool / out-of-range). Reject the combination up front rather than
-        # silently corrupting state.
+        # The host-offload path (enabled by --enable-hierarchical-cache) and
+        # custom radix-cache backends are NOT int8-aware: they would read int8
+        # checkpoint slots as bf16 active slots (wrong pool / out-of-range).
+        # Reject the combination up front rather than silently corrupting state.
         if not self.enable_int8_mamba_checkpoint:
             return
         if self.enable_hierarchical_cache:

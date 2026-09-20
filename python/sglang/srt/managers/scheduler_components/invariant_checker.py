@@ -91,8 +91,8 @@ class SchedulerInvariantChecker:
             session_held = self.pool_stats_observer.session_held_full_tokens()
             total = self.full_tokens_per_layer
         elif self.is_hybrid_ssm:
-            # Branch on cache type for the protected accessor (MambaRadixCache
-            # splits full/mamba; ChunkCache only has the single protected_size).
+            # Branch on cache type for the protected accessor (a mamba-capable
+            # cache splits full/mamba; ChunkCache only has the single protected_size).
             # Use the allocator's `.size` for `total`: static max_total_num_tokens for
             # non-unified pools, the dynamic byte-coordinated cap (matching
             # `available_size`) for the unified pool.

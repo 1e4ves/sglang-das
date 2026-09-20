@@ -284,11 +284,11 @@ def release_kv_cache(req: Req, tree_cache: BasePrefixCache, is_insert: bool = Tr
     """Give the request's kv row back; with ``is_insert`` the tree first keeps
     what it can key."""
     assert (not req.kv.holds_kv) == req.kv.is_kv_released
-    # MambaRadixCache may alloc mamba state before alloc KV cache
+    # A mamba-capable cache may alloc mamba state before alloc KV cache
     if not req.kv.holds_kv:
-        assert (
-            tree_cache.supports_mamba()
-        ), "Only MambaRadixCache allow freeing before alloc"
+        assert tree_cache.supports_mamba(), (
+            "Only a mamba-capable tree cache allows freeing before alloc"
+        )
         # TODO (csy, hanming): clean up this early allocation logic
         if req.kv.holds_mamba:
             tree_cache.req_to_token_pool.mamba_allocator.free(
