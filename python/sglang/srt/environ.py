@@ -618,7 +618,6 @@ class Envs:
     # ===================================================================
     # Radix and sparse KV caches
     # ===================================================================
-    SGLANG_EXPERIMENTAL_CPP_RADIX_TREE = EnvBool(False)
     SGLANG_RADIX_FORCE_MISS = EnvBool(False)
     SGLANG_CHUNKED_PREFIX_CACHE_THRESHOLD = EnvInt(0)  # HCU override
     SGLANG_MAX_KV_CHUNK_CAPACITY = EnvInt(128 * 1024)
