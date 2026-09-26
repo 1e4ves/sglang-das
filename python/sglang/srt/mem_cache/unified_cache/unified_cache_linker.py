@@ -335,8 +335,10 @@ class UnifiedCacheLinkerWrapper:
                     else None
                 ),
                 prev_prefix_len=device_hit_len,
-                swa_evicted_seqlen=(
-                    req.kv.swa_evicted_seqlen if req.kv is not None else 0
+                component_evicted_seqlens=(
+                    req.kv.component_evicted_seqlens.copy()
+                    if req.kv is not None
+                    else {}
                 ),
                 chunked=True,
                 priority=req.priority or 0,

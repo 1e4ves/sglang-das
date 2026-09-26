@@ -23,6 +23,7 @@ from sglang.srt.managers.scheduler_components.pool_stats_observer import (
 from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
 from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache
 from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
+from sglang.srt.mem_cache.unified_cache.component_type import ComponentType
 from sglang.srt.runtime_context import get_parallel
 from sglang.srt.utils.common import (
     ceil_align,
@@ -265,7 +266,8 @@ class SchedulerInvariantChecker:
             full_uncached += allocated_len - req.kv.cache_protected_len
             if self.is_hybrid_swa:
                 swa_uncached += allocated_len - max(
-                    req.kv.cache_protected_len, req.kv.swa_evicted_seqlen
+                    req.kv.cache_protected_len,
+                    req.kv.get_evicted_seqlen(ComponentType.SWA),
                 )
 
         return full_uncached, swa_uncached

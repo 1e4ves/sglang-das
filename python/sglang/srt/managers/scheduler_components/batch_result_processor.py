@@ -29,6 +29,7 @@ from sglang.srt.mem_cache.common import (
     release_kv_cache,
 )
 from sglang.srt.mem_cache.radix_cache import RadixKey
+from sglang.srt.mem_cache.unified_cache.component_type import ComponentType
 from sglang.srt.model_executor.forward_batch_info import (
     CaptureHiddenMode,
     get_required_capture_hidden_mode,
@@ -201,8 +202,8 @@ class SchedulerBatchResultProcessor:
             req.allow_radix_cache_insert_once = False
             return
 
-        old_cache_protected_len = req.cache_protected_len
-        old_swa_evicted_seqlen = req.kv.swa_evicted_seqlen
+        old_cache_protected_len = req.kv.cache_protected_len
+        old_swa_evicted_seqlen = req.kv.get_evicted_seqlen(ComponentType.SWA)
         old_force_leaf_creation = getattr(req, "force_radix_leaf_creation", False)
 
         # DSV4 prompt donation only needs a full-attention radix leaf. Mark the
@@ -211,7 +212,7 @@ class SchedulerBatchResultProcessor:
         # Do not pre-protect the whole radix key here: when the prefix already
         # exists, the generic overlap path must free this request's duplicate
         # prompt pages and repoint it to the existing radix leaf.
-        req.kv.swa_evicted_seqlen = radix_key_len
+        req.kv.set_evicted_seqlen(ComponentType.SWA, radix_key_len)
         req.force_radix_leaf_creation = True
         try:
             maybe_cache_unfinished_req(req, self.tree_cache)
@@ -251,10 +252,10 @@ class SchedulerBatchResultProcessor:
                     radix_key_len,
                 )
         finally:
-            req.kv.swa_evicted_seqlen = old_swa_evicted_seqlen
+            req.kv.set_evicted_seqlen(ComponentType.SWA, old_swa_evicted_seqlen)
             req.force_radix_leaf_creation = old_force_leaf_creation
-            if req.cache_protected_len < old_cache_protected_len:
-                req.cache_protected_len = old_cache_protected_len
+            if req.kv.cache_protected_len < old_cache_protected_len:
+                req.kv.cache_protected_len = old_cache_protected_len
 
     def _maybe_collect_indexer_topk(self, req: Req):
         capturer = get_global_indexer_capturer()

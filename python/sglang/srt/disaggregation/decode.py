@@ -103,6 +103,7 @@ from sglang.srt.mem_cache.memory_pool import (
 )
 from sglang.srt.mem_cache.radix_cache import RadixKey
 from sglang.srt.mem_cache.swa_memory_pool import SWAKVPool
+from sglang.srt.mem_cache.unified_cache.component_type import ComponentType
 from sglang.srt.observability.req_time_stats import (
     set_schedule_time_batch,
     set_time_batch,
@@ -442,8 +443,7 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
             req.last_node = self.tree_cache.root_node_handle(
                 extra_key=getattr(req, "extra_key", None)
             )
-        req.swa_uuid_for_lock = None
-        req.skip_lock_node_ids = {}
+        req.lock_receipt = DecLockRefParams()
 
     def _reclaim_swa_tail_capacity(
         self, swa_tail_len: int, req_id: str
@@ -2579,7 +2579,7 @@ def alloc_for_decode_prealloc_hisparse(
         )
         swa_evicted_seqlen = fill_len - swa_tail_len
         assert swa_evicted_seqlen >= 0 and swa_evicted_seqlen % allocator.page_size == 0
-        req.kv.swa_evicted_seqlen = swa_evicted_seqlen
+        req.kv.set_evicted_seqlen(ComponentType.SWA, swa_evicted_seqlen)
     else:
         kv_loc = allocator.alloc_logical_only(
             prefix_lens=prefix_lens,
@@ -2651,7 +2651,7 @@ def alloc_for_decode_prealloc(
                 swa_evicted_seqlen >= 0
                 and swa_evicted_seqlen % allocator.page_size == 0
             )
-            req.kv.swa_evicted_seqlen = swa_evicted_seqlen
+            req.kv.set_evicted_seqlen(ComponentType.SWA, swa_evicted_seqlen)
         else:
             kv_loc = allocator.alloc_extend(
                 prefix_lens=torch.tensor(
