@@ -930,17 +930,17 @@ class UnifiedRadixCache(BasePrefixCache):
                 )
             )
 
-        # Free the unaligned tail and the deferred truncation tail.
+        # Everything past the inserted key goes back, the protected prefix
+        # never does.
         free_from = page_aligned_len
-        ranges = [(free_from, len(kv_indices))]
-        if tail_free_start is not None:
-            if free_from < len(kv_indices) and tail_free_start <= len(kv_indices):
-                # The two halves touch at the truncation boundary and share
-                # that page; free the union as one range.
-                ranges[0] = (free_from, len(kv_indices_full))
-            else:
-                ranges.append((tail_free_start, len(kv_indices_full)))
-        self.free_kv_row(req.kv, ranges)
+        if tail_free_start is not None and tail_free_start > len(kv_indices):
+            # Truncated below the protected prefix: only an untracked mamba
+            # request gets here, with an empty key, and owns nothing before it.
+            assert free_from == len(kv_indices), (
+                f"{free_from=} {len(kv_indices)=} {req.kv.cache_protected_len=}"
+            )
+            free_from = tail_free_start
+        self.free_kv_row(req.kv, [(free_from, len(kv_indices_full))])
 
         self.unpin(req)
 
