@@ -852,17 +852,14 @@ class UnifiedRadixCache(BasePrefixCache):
         for comp in self._components_tuple:
             comp.cleanup_after_caching_req(req, is_finished=True)
 
-    def cache_finished_req(self, req: Req, *, owned_kv_len: int, **kwargs) -> None:
+    def insert_req(self, req: Req, *, up_to: int, **kwargs) -> None:
         if self.disable:
-            self.free_kv_row(req.kv, [(req.kv.cache_protected_len, owned_kv_len)])
             for comp in self._components_tuple:
                 comp.cleanup_after_caching_req(req, is_finished=True)
             return
 
-        token_ids = (req.origin_input_ids + req.output_ids)[:owned_kv_len]
-        kv_indices = self.req_to_token_pool.req_to_token[
-            req.kv.req_pool_idx, :owned_kv_len
-        ]
+        token_ids = (req.origin_input_ids + req.output_ids)[:up_to]
+        kv_indices = self.req_to_token_pool.req_to_token[req.kv.req_pool_idx, :up_to]
 
         insert_params = InsertParams(
             prev_prefix_len=req.kv.cache_protected_len,
@@ -930,7 +927,7 @@ class UnifiedRadixCache(BasePrefixCache):
                 )
             )
 
-        # Everything past the inserted key goes back, the protected prefix
+        # Everything past the inserted key goes back to the caller, the protected prefix
         # never does.
         free_from = page_aligned_len
         if tail_free_start is not None and tail_free_start > len(kv_indices):
@@ -940,12 +937,7 @@ class UnifiedRadixCache(BasePrefixCache):
                 f"{free_from=} {len(kv_indices)=} {req.kv.cache_protected_len=}"
             )
             free_from = tail_free_start
-        self.free_kv_row(req.kv, [(free_from, len(kv_indices_full))])
-
-        self.unpin(req)
-
-        if result is not None and result.last_device_node is not None:
-            req.last_node = result.last_device_node
+        req.kv.cache_protected_len = free_from
 
         # cleanup
         for comp in self._components_tuple:
@@ -959,7 +951,9 @@ class UnifiedRadixCache(BasePrefixCache):
             if req.finished_reason is not None and not isinstance(
                 req.finished_reason, FINISH_ABORT
             ):
-                self.session_refs.register_session_ref(req)
+                self.session_refs.register_session_ref(
+                    req, leaf=result.last_device_node
+                )
 
     def advance_unpublished_req(self, req: Req, chunked: bool = False) -> None:
         assert not self.supports_mamba()
