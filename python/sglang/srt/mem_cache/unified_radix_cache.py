@@ -852,8 +852,8 @@ class UnifiedRadixCache(BasePrefixCache):
         for comp in self._components_tuple:
             comp.cleanup_after_caching_req(req, is_finished=True)
 
-    def insert_req(self, req: Req, *, up_to: int, **kwargs) -> None:
-        if self.session.try_insert_req(req, up_to=up_to, **kwargs):
+    def checkpoint(self, req: Req, *, up_to: int, **kwargs) -> None:
+        if self.session.try_checkpoint(req, up_to=up_to, **kwargs):
             return
         # A finished request hands its component state (mamba) to the tree
         # instead of forking it, and the tree frees what the request still held.

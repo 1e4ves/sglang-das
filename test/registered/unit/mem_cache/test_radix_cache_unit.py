@@ -509,7 +509,7 @@ class TestRadixCache(CustomTestCase):
         )
         self.assertEqual(cache.total_size(), 5)
 
-    def test_insert_req_deferred_free_owns_original_indices(self):
+    def test_checkpoint_deferred_free_owns_original_indices(self):
         class ReqToTokenPool:
             def __init__(self, row):
                 self.req_to_token = row.unsqueeze(0)
@@ -550,7 +550,7 @@ class TestRadixCache(CustomTestCase):
 
         available_before_free = allocator.available_size()
         allocator.free_group_begin()
-        cache.insert_req(req, up_to=len(token_ids))
+        cache.checkpoint(req, up_to=len(token_ids))
         allocator.free_group_end()
 
         self.assertEqual(
@@ -595,7 +595,7 @@ class TestRadixCache(CustomTestCase):
         )
 
         up_to = len(prompt_ids) + len(output_ids)
-        cache.insert_req(req, up_to=up_to)
+        cache.checkpoint(req, up_to=up_to)
         cache.free_kv_row(req.kv, [(req.kv.cache_protected_len, up_to)])
         cache.unpin(req)
 
