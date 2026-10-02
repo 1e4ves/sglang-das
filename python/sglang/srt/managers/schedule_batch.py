@@ -840,6 +840,9 @@ class ReqKvInfo:
 
     # The request's own KV is [cache_protected_len, kv_allocated_len).
     cache_protected_len: int = 0  # Tree cache owns [0, here) (matched or inserted)
+    # This request already inserted [0, here) into the tree; later inserts count
+    # a hit only on the nodes past it, so a request counts each node once.
+    cache_inserted_len: int = 0
     kv_committed_len: int = 0  # KV content committed up to here, <= kv_allocated_len
     kv_allocated_len: int = 0
 
@@ -1803,6 +1806,7 @@ class Req(ReqDllmMixin):
         self.indexer_topk = None
         self.last_node = None
         self.kv.cache_protected_len = 0
+        self.kv.cache_inserted_len = 0
         self.num_matched_prefix_tokens = 0
         self.lock_receipt = DecLockRefParams()
         self.swa_prefix_lock_released = False

@@ -172,7 +172,12 @@ def free_kv_row_segments(
         allocator.free_segments(swa_alive)
 
 
-def maybe_cache_unfinished_req(req: Req, tree_cache: BasePrefixCache, **kwargs):
+def checkpoint_kv_cache(req: Req, tree_cache: BasePrefixCache, **kwargs) -> None:
+    """Publish what the running request has computed so far, unless it is
+    barred from the tree."""
+    # The tree reads req.finished() to tell a checkpoint from the final
+    # insert; a finished request belongs in release_kv_cache.
+    assert not req.finished(), f"checkpointing finished request {req.rid}"
     if req.skip_radix_cache_insert:
         if getattr(req, "allow_radix_cache_insert_once", False):
             req.allow_radix_cache_insert_once = False
@@ -189,7 +194,7 @@ def maybe_cache_unfinished_req(req: Req, tree_cache: BasePrefixCache, **kwargs):
                 ].to(dtype=torch.int64, copy=True)
             return
 
-    tree_cache.cache_unfinished_req(req, **kwargs)
+    tree_cache.insert_req(req, up_to=req.extend_range.end)
 
 
 def evict_from_tree_cache(tree_cache: BasePrefixCache | None, num_tokens: int):
@@ -303,6 +308,13 @@ def release_kv_cache(req: Req, tree_cache: BasePrefixCache, is_insert: bool = Tr
     owned_kv_len = req.owned_kv_len()
     is_insert = is_insert and not req.skip_radix_cache_insert
     if is_insert:
+        # A tree that takes over component state (mamba) must see the request
+        # finished, or the insert forks the state and the slot leaks.
+        assert req.finished() or not tree_cache.supports_mamba(), (
+            f"releasing unfinished request {req.rid} into a mamba tree"
+        )
+        # The fill-id array lags output_ids until the next prepare_for_decode.
+        req._refresh_fill_ids()
         tree_cache.insert_req(req, up_to=owned_kv_len)
     # The protected prefix is not this req's to free.
     tree_cache.free_kv_row(req.kv, [(req.kv.cache_protected_len, owned_kv_len)])

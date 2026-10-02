@@ -853,52 +853,82 @@ class UnifiedRadixCache(BasePrefixCache):
             comp.cleanup_after_caching_req(req, is_finished=True)
 
     def insert_req(self, req: Req, *, up_to: int, **kwargs) -> None:
+        if self.session.try_insert_req(req, up_to=up_to, **kwargs):
+            return
+        # A finished request hands its component state (mamba) to the tree
+        # instead of forking it, and the tree frees what the request still held.
+        is_finished = req.finished()
+        token_ids = req.full_untruncated_fill_ids[:up_to]
+
         if self.disable:
-            for comp in self._components_tuple:
-                comp.cleanup_after_caching_req(req, is_finished=True)
+            kv_indices = self.req_to_token_pool.req_to_token[
+                req.kv.req_pool_idx, : len(token_ids)
+            ]
+            req.prefix_indices = kv_indices.to(dtype=torch.int64, copy=True)
+            if is_finished:
+                for comp in self._components_tuple:
+                    comp.cleanup_after_caching_req(req, is_finished=True)
             return
 
-        token_ids = (req.origin_input_ids + req.output_ids)[:up_to]
-        kv_indices = self.req_to_token_pool.req_to_token[req.kv.req_pool_idx, :up_to]
-
-        insert_params = InsertParams(
-            prev_prefix_len=req.kv.cache_protected_len,
-            priority=req.priority or 0,
-        )
+        kv_indices_orig = self.req_to_token_pool.req_to_token[
+            req.kv.req_pool_idx, : len(token_ids)
+        ]
 
         # components prepare insert data + return effective cache_len
+        insert_params = InsertParams(
+            prev_prefix_len=req.kv.cache_protected_len,
+            inserted_len=req.kv.cache_inserted_len,
+            priority=req.priority or 0,
+        )
         effective_cache_len = len(token_ids)
         for comp in self._components_tuple:
             cl = comp.prepare_for_caching_req(
                 req=req,
                 insert_params=insert_params,
                 token_ids_len=len(token_ids),
-                is_finished=True,
+                is_finished=is_finished,
             )
             if cl is not None:
                 effective_cache_len = min(effective_cache_len, cl)
 
-        # Truncate if needed; the tail free is deferred and batched with
-        # the unaligned tail below so a shared boundary page is emitted once.
-        kv_indices_full = kv_indices
-        tail_free_start = None
-        if effective_cache_len < len(token_ids):
-            tail_free_start = max(effective_cache_len, req.kv.cache_protected_len)
-            token_ids = token_ids[:effective_cache_len]
-            kv_indices = kv_indices[:effective_cache_len]
-
         radix_key = RadixKey(
-            token_ids,
+            token_ids[:effective_cache_len],
             req.extra_key,
             is_bigram=self.tree_core.is_eagle,
             cache_salt=req.cache_salt,
-        ).page_aligned(self.page_size)
+        )
+
+        if (
+            not is_finished
+            and envs.SGLANG_OPT_UNIFIED_CACHE_FREE_OUT_OF_WINDOW_SLOTS.get()
+        ):
+            # The frontier lands a page below page_floor(pre_len + 1), which has to
+            # be where the insert stops, or the leaf it creates keeps less than a
+            # sliding window of live SWA and the match after the insert rejects it.
+            # The insert stops at page_floor(len(radix_key)), and a bigram key is
+            # one shorter than the tokens it spans, so measure the key.
+            for comp in self._components_tuple:
+                comp.free_out_of_window_slots(req, len(radix_key) - 1, insert_params)
+
+        if effective_cache_len <= 0:
+            req.prefix_indices = kv_indices_orig.to(dtype=torch.int64, copy=True)
+            for comp in self._components_tuple:
+                comp.cleanup_after_caching_req(
+                    req, is_finished=is_finished, insert_params=insert_params
+                )
+            return
+
+        kv_indices = kv_indices_orig[:effective_cache_len]
+
+        radix_key = radix_key.page_aligned(self.page_size)
         page_aligned_len = len(radix_key)
         values = kv_indices[:page_aligned_len].to(dtype=torch.int64, copy=True)
 
         insert_params.key = radix_key
         insert_params.value = values
         result = self.insert(insert_params)
+
+        req.kv.cache_inserted_len = max(req.kv.cache_inserted_len, page_aligned_len)
 
         # Split the leaf at the prompt boundary so eviction can drop the output
         # KV without the prompt. prev_prefix_len keeps the overlapping indices
@@ -920,146 +950,10 @@ class UnifiedRadixCache(BasePrefixCache):
                     key=prompt_key,
                     value=values[: len(prompt_key)],
                     prev_prefix_len=len(prompt_key),
+                    inserted_len=len(prompt_key),
                     priority=insert_params.priority + 1,
-                    # The request created these nodes moments ago; another
-                    # hit_count bump would promote every prompt node.
-                    chunked=True,
                 )
             )
-
-        # Everything past the inserted key goes back to the caller, the protected prefix
-        # never does.
-        free_from = page_aligned_len
-        if tail_free_start is not None and tail_free_start > len(kv_indices):
-            # Truncated below the protected prefix: only an untracked mamba
-            # request gets here, with an empty key, and owns nothing before it.
-            assert free_from == len(kv_indices), (
-                f"{free_from=} {len(kv_indices)=} {req.kv.cache_protected_len=}"
-            )
-            free_from = tail_free_start
-        req.kv.cache_protected_len = free_from
-
-        # cleanup
-        for comp in self._components_tuple:
-            comp.cleanup_after_caching_req(
-                req, is_finished=True, insert_result=result, insert_params=insert_params
-            )
-
-        if self.enable_session_radix_cache and result is not None:
-            from sglang.srt.managers.schedule_batch import FINISH_ABORT
-
-            if req.finished_reason is not None and not isinstance(
-                req.finished_reason, FINISH_ABORT
-            ):
-                self.session_refs.register_session_ref(
-                    req, leaf=result.last_device_node
-                )
-
-    def advance_unpublished_req(self, req: Req, chunked: bool = False) -> None:
-        assert not self.supports_mamba()
-        token_ids = req.get_fill_ids()
-        kv_indices = self.req_to_token_pool.req_to_token[
-            req.kv.req_pool_idx, : len(token_ids)
-        ]
-        insert_params = InsertParams(
-            prev_prefix_len=req.kv.cache_protected_len,
-            chunked=chunked,
-            priority=req.priority or 0,
-        )
-        effective_cache_len = len(token_ids)
-        for comp in self._components_tuple:
-            cache_len = comp.prepare_for_caching_req(
-                req=req,
-                insert_params=insert_params,
-                token_ids_len=len(token_ids),
-                is_finished=False,
-            )
-            if cache_len is not None:
-                effective_cache_len = min(effective_cache_len, cache_len)
-
-        radix_key = RadixKey(
-            token_ids[:effective_cache_len],
-            req.extra_key,
-            is_bigram=self.tree_core.is_eagle,
-            cache_salt=req.cache_salt,
-        )
-        if envs.SGLANG_OPT_UNIFIED_CACHE_FREE_OUT_OF_WINDOW_SLOTS.get():
-            for comp in self._components_tuple:
-                comp.free_out_of_window_slots(req, len(radix_key) - 1, insert_params)
-
-        req.prefix_indices = kv_indices.to(dtype=torch.int64, copy=True)
-        for comp in self._components_tuple:
-            comp.cleanup_after_caching_req(
-                req, is_finished=False, insert_params=insert_params
-            )
-
-    def cache_unfinished_req(self, req: Req, chunked: bool = False, **kwargs) -> None:
-        if self.session.try_cache_unfinished_req(req, chunked=chunked, **kwargs):
-            return
-
-        token_ids = req.get_fill_ids()
-
-        if self.disable:
-            kv_indices = self.req_to_token_pool.req_to_token[
-                req.kv.req_pool_idx, : len(token_ids)
-            ]
-            req.prefix_indices = kv_indices.to(dtype=torch.int64, copy=True)
-            return
-
-        kv_indices_orig = self.req_to_token_pool.req_to_token[
-            req.kv.req_pool_idx, : len(token_ids)
-        ]
-
-        # components prepare insert data + return effective cache_len
-        insert_params = InsertParams(
-            prev_prefix_len=req.kv.cache_protected_len,
-            chunked=chunked,
-            priority=req.priority or 0,
-        )
-        effective_cache_len = len(token_ids)
-        for comp in self._components_tuple:
-            cl = comp.prepare_for_caching_req(
-                req=req,
-                insert_params=insert_params,
-                token_ids_len=len(token_ids),
-                is_finished=False,
-            )
-            if cl is not None:
-                effective_cache_len = min(effective_cache_len, cl)
-
-        radix_key = RadixKey(
-            token_ids[:effective_cache_len],
-            req.extra_key,
-            is_bigram=self.tree_core.is_eagle,
-            cache_salt=req.cache_salt,
-        )
-
-        if envs.SGLANG_OPT_UNIFIED_CACHE_FREE_OUT_OF_WINDOW_SLOTS.get():
-            # The frontier lands a page below page_floor(pre_len + 1), which has to
-            # be where the insert stops, or the leaf it creates keeps less than a
-            # sliding window of live SWA and the match after the insert rejects it.
-            # The insert stops at page_floor(len(radix_key)), and a bigram key is
-            # one shorter than the tokens it spans, so measure the key.
-            for comp in self._components_tuple:
-                comp.free_out_of_window_slots(req, len(radix_key) - 1, insert_params)
-
-        if effective_cache_len <= 0:
-            req.prefix_indices = kv_indices_orig.to(dtype=torch.int64, copy=True)
-            for comp in self._components_tuple:
-                comp.cleanup_after_caching_req(
-                    req, is_finished=False, insert_params=insert_params
-                )
-            return
-
-        kv_indices = kv_indices_orig[:effective_cache_len]
-
-        radix_key = radix_key.page_aligned(self.page_size)
-        page_aligned_len = len(radix_key)
-        values = kv_indices[:page_aligned_len].to(dtype=torch.int64, copy=True)
-
-        insert_params.key = radix_key
-        insert_params.value = values
-        result = self.insert(insert_params)
 
         # Repoint by full-attention residency. DSV4 prompt donation deliberately
         # creates a full-only leaf whose SWA component is a tombstone.
@@ -1118,9 +1012,55 @@ class UnifiedRadixCache(BasePrefixCache):
         for comp in self._components_tuple:
             comp.cleanup_after_caching_req(
                 req,
-                is_finished=False,
+                is_finished=is_finished,
                 insert_result=result,
                 insert_params=insert_params,
+            )
+
+        if self.enable_session_radix_cache and is_finished:
+            from sglang.srt.managers.schedule_batch import FINISH_ABORT
+
+            if not isinstance(req.finished_reason, FINISH_ABORT):
+                self.session_refs.register_session_ref(
+                    req, leaf=result.last_device_node
+                )
+
+    @rank_consensus(same_params=["req.rid"])
+    def advance_unpublished_req(self, req: Req) -> None:
+        assert not self.supports_mamba()
+        token_ids = req.get_fill_ids()
+        kv_indices = self.req_to_token_pool.req_to_token[
+            req.kv.req_pool_idx, : len(token_ids)
+        ]
+        insert_params = InsertParams(
+            prev_prefix_len=req.kv.cache_protected_len,
+            priority=req.priority or 0,
+        )
+        effective_cache_len = len(token_ids)
+        for comp in self._components_tuple:
+            cache_len = comp.prepare_for_caching_req(
+                req=req,
+                insert_params=insert_params,
+                token_ids_len=len(token_ids),
+                is_finished=False,
+            )
+            if cache_len is not None:
+                effective_cache_len = min(effective_cache_len, cache_len)
+
+        radix_key = RadixKey(
+            token_ids[:effective_cache_len],
+            req.extra_key,
+            is_bigram=self.tree_core.is_eagle,
+            cache_salt=req.cache_salt,
+        )
+        if envs.SGLANG_OPT_UNIFIED_CACHE_FREE_OUT_OF_WINDOW_SLOTS.get():
+            for comp in self._components_tuple:
+                comp.free_out_of_window_slots(req, len(radix_key) - 1, insert_params)
+
+        req.prefix_indices = kv_indices.to(dtype=torch.int64, copy=True)
+        for comp in self._components_tuple:
+            comp.cleanup_after_caching_req(
+                req, is_finished=False, insert_params=insert_params
             )
 
     # ---- Internal Helpers ----

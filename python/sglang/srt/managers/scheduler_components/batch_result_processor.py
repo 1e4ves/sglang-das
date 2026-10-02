@@ -25,7 +25,7 @@ from sglang.srt.managers.schedule_batch import (
 )
 from sglang.srt.mem_cache.common import (
     free_swa_out_of_window_slots,
-    maybe_cache_unfinished_req,
+    checkpoint_kv_cache,
     release_kv_cache,
 )
 from sglang.srt.mem_cache.radix_cache import RadixKey
@@ -179,7 +179,7 @@ class SchedulerBatchResultProcessor:
         req.allow_radix_cache_insert_once = True
         prompt_len = getattr(req, "dsv4_decode_radix_cache_prompt_len", None)
         if prompt_len is None:
-            maybe_cache_unfinished_req(req, self.tree_cache)
+            checkpoint_kv_cache(req, self.tree_cache)
             return
 
         page_size = self.tree_cache.page_size
@@ -215,7 +215,7 @@ class SchedulerBatchResultProcessor:
         req.kv.set_evicted_seqlen(ComponentType.SWA, radix_key_len)
         req.force_radix_leaf_creation = True
         try:
-            maybe_cache_unfinished_req(req, self.tree_cache)
+            checkpoint_kv_cache(req, self.tree_cache)
             # The donated leaf is full-only, so this request's SWA tail is
             # private and looks free to release outright. It is not: the request
             # keeps decoding and its sliding window still reaches back into the
@@ -425,7 +425,7 @@ class SchedulerBatchResultProcessor:
                         release_kv_cache(req, self.tree_cache)
                         req.time_stats.set_completion_time()
                     elif not batch.decoding_reqs or req not in batch.decoding_reqs:
-                        maybe_cache_unfinished_req(req, self.tree_cache)
+                        checkpoint_kv_cache(req, self.tree_cache)
                         if get_memory().enable_hisparse:
                             self.hisparse_coordinator.admit_request_into_staging(req)
 
@@ -511,7 +511,7 @@ class SchedulerBatchResultProcessor:
                         release_kv_cache(req, self.tree_cache)
                         req.time_stats.set_completion_time()
                     else:
-                        maybe_cache_unfinished_req(req, self.tree_cache)
+                        checkpoint_kv_cache(req, self.tree_cache)
                 else:
                     # being chunked reqs' prefill is not finished
                     req.inflight_middle_chunks -= 1

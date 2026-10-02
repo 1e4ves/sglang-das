@@ -69,9 +69,9 @@ from sglang.srt.managers.schedule_batch import (
 )
 from sglang.srt.mem_cache.base_prefix_cache import CacheRequestOutcome
 from sglang.srt.mem_cache.common import (
+    checkpoint_kv_cache,
     kv_to_page_indices,
     kv_to_page_num,
-    maybe_cache_unfinished_req,
     release_kv_cache,
 )
 from sglang.srt.mem_cache.deepseek_v4_memory_pool import DeepSeekV4TokenToKVPool
@@ -1111,15 +1111,15 @@ class SchedulerDisaggregationPrefillMixin:
             if room is not None and room in kv_mgr.transfer_infos:
                 prefetch(room)
 
-    def cache_unfinished_disagg_prefill(
+    def checkpoint_disagg_prefill(
         self: Scheduler, req: Req, *, chunked: bool = False
     ) -> None:
         cache = self.tree_cache
         if req.pending_bootstrap and _uses_write_through_cache(cache):
-            cache.advance_unpublished_req(req, chunked=chunked)
+            cache.advance_unpublished_req(req)
             return
 
-        maybe_cache_unfinished_req(req, cache, chunked=chunked)
+        checkpoint_kv_cache(req, cache, chunked=chunked)
 
     def release_aborted_prefill_waiting_req(self: Scheduler, req: Req) -> None:
         self.clear_pending_chunk_send(req)
@@ -1642,7 +1642,7 @@ class SchedulerDisaggregationPrefillMixin:
                         advance_logprob_pt(i, req)
                         continue
 
-                self.cache_unfinished_disagg_prefill(req)
+                self.checkpoint_disagg_prefill(req)
                 self.disagg_prefill_inflight_queue.append(req)
                 if self.spec_algorithm.is_eagle() and draft_input is not None:
                     req.output_topk_p = draft_input.topk_p[i]
@@ -1917,6 +1917,8 @@ class SchedulerDisaggregationPrefillMixin:
         else:
             logger.warning(error_message)
         req.time_stats.trace_ctx.abort(abort_info={"reason": error_message})
+        if req.finished_reason is None:
+            req.finished_reason = FINISH_LENGTH(length=0)
         release_kv_cache(req, self.tree_cache)  # unlock the tree
         self._release_aborted_request(req)
         if not isinstance(req.finished_reason, FINISH_ABORT):
@@ -2036,7 +2038,7 @@ class SchedulerDisaggregationPrefillMixin:
             if should_force_retry(req):  # test hook
                 return False
             if self.disagg_prefill_bootstrap_queue.finalize_bootstrap(req):
-                self.cache_unfinished_disagg_prefill(req)
+                self.checkpoint_disagg_prefill(req)
                 return True
             if is_aborted(req):
                 self.handle_bootstrap_failure(req)
@@ -2066,7 +2068,7 @@ class SchedulerDisaggregationPrefillMixin:
         chunked_req_to_exclude = set()
         if (req := self.chunked_req) is not None:
             chunked_req_to_exclude.add(req)
-            self.cache_unfinished_disagg_prefill(req, chunked=True)
+            self.checkpoint_disagg_prefill(req, chunked=True)
 
             if not self.check_bootstrap(req):
                 if is_aborted(req):
@@ -2411,7 +2413,7 @@ class SchedulerDisaggregationPrefillMixin:
         max_attempts = get_disagg().optimistic_prefill_attempts
         uses_write_through_cache = _uses_write_through_cache(self.tree_cache)
         if not uses_write_through_cache:
-            maybe_cache_unfinished_req(req, self.tree_cache)
+            checkpoint_kv_cache(req, self.tree_cache)
         # The cached prefix is evictable once the KV is released. Its length
         # (capped at what a retry can match) seeds the retry's storage baseline,
         # so an evicted prefix is looked up in L3 once before it is recomputed.

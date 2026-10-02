@@ -33,7 +33,7 @@ this branch): the TreeCore insert walk counts the node in `prefix_len`
 regardless of component consumption, while the SWA match validator rejects a
 `value is None` node — a declined recovery makes `insert` report a prefix the
 follow-up `match_prefix` cannot honor, tripping
-`new_prefix_len <= len(new_indices)` in `cache_unfinished_req`.
+`new_prefix_len <= len(new_indices)` in `insert_req`.
 
     python -m pytest test/registered/unit/mem_cache/test_swa_locked_full_recover_unified.py -v
 """

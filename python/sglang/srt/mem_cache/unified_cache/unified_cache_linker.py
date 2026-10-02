@@ -340,7 +340,7 @@ class UnifiedCacheLinkerWrapper:
                     if req.kv is not None
                     else {}
                 ),
-                chunked=True,
+                inserted_len=len(hit.prefix_key),
                 priority=req.priority or 0,
                 track_adopted_ranges=True,
             )
