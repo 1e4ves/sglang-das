@@ -82,9 +82,12 @@ def default_radix_cache_factory(ctx: TreeCacheBuildContext) -> BasePrefixCache:
     server_args = ctx.server_args
     params = ctx.params
 
-    if (
-        ctx.disable_radix_cache
-        and get_disagg().disaggregation_decode_retraction_backup == "host_pool"
+    is_pure_swa = ctx.is_hybrid_swa and ctx.full_tokens_per_layer == 0
+    if ctx.disable_radix_cache and (
+        get_disagg().disaggregation_decode_retraction_backup == "host_pool"
+        # Streaming sessions live in UnifiedRadixCache; its disabled mode
+        # stands in for the chunk caches. Pure-SWA has no unified layout.
+        or (ctx.server_args.enable_streaming_session and not is_pure_swa)
     ):
         return _create_unified_radix_cache(ctx, server_args, params)
 
@@ -263,25 +266,25 @@ def create_tree_cache(ctx: TreeCacheBuildContext) -> BasePrefixCache:
             "option that selected another tree cache for this model."
         )
 
-    hicache_attached = cache.cache_controller is not None
-    streaming_wrapped = False
-    if (
-        ctx.server_args.enable_streaming_session
-        and not cache.supports_streaming_session()
+    from sglang.srt.mem_cache.unified_radix_cache import UnifiedRadixCache
+
+    if ctx.server_args.enable_streaming_session and not isinstance(
+        cache, UnifiedRadixCache
     ):
-        from sglang.srt.session.streaming_session import StreamingSession
+        raise NotImplementedError(
+            f"--enable-streaming-session is not verified with {type(cache).__name__}; "
+            "streaming sessions run on UnifiedRadixCache. Please open an issue or "
+            "a PR at https://github.com/sgl-project/sglang if you need this."
+        )
 
-        cache = StreamingSession(cache)
-        streaming_wrapped = True
-
+    hicache_attached = cache.cache_controller is not None
     logger.info(
         "Tree cache initialized: source=%s impl=%s hybrid_swa=%s hybrid_ssm=%s "
-        "hicache_attached=%s streaming_wrapped=%s",
+        "hicache_attached=%s",
         source,
         type(cache).__name__,
         ctx.is_hybrid_swa,
         ctx.is_hybrid_ssm,
         hicache_attached,
-        streaming_wrapped,
     )
     return cache
