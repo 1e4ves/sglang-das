@@ -3543,7 +3543,10 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                             req.last_node, req.lock_receipt
                         )
                         req.swa_prefix_lock_released = True
-                elif self.forward_mode.is_extend() and self.tree_cache.is_chunk_cache():
+                elif (
+                    self.forward_mode.is_extend()
+                    and not self.tree_cache.supports_prefix_sharing()
+                ):
                     pre_len = self.prefix_lens[idx]
                     if self.enable_overlap:
                         # In chunked prefill case, when the second extend batch is scheduling, the first extend batch is still running, so we cannot evict swa tokens
@@ -3569,7 +3572,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             page_size=self.tree_cache.page_size,
             req_to_token_pool=self.req_to_token_pool,
             token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
-            is_chunk_cache=self.tree_cache.is_chunk_cache(),
+            supports_prefix_sharing=self.tree_cache.supports_prefix_sharing(),
             retain_floor=self.tree_cache.swa_retain_floor(req),
         )
 

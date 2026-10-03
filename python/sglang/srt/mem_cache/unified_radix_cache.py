@@ -534,8 +534,8 @@ class UnifiedRadixCache(BasePrefixCache):
             result = self.linker.match(params.key, params.req, result)
         return result
 
-    def is_chunk_cache(self) -> bool:
-        return self.disable
+    def supports_prefix_sharing(self) -> bool:
+        return not self.disable
 
     def insert(self, params: InsertParams) -> InsertResult:
         if self.disable:

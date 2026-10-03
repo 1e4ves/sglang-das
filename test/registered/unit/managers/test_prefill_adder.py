@@ -689,7 +689,7 @@ class TestPrefillAdder(CustomTestCase):
         self.mock_token_allocator.full_available_size.return_value = 100_000
         self.mock_token_allocator.available_size.return_value = 100_000
         self.mock_tree_cache.sliding_window_size = WINDOW
-        self.mock_tree_cache.is_tree_cache.return_value = False
+        self.mock_tree_cache.supports_prefix_sharing.return_value = False
         adder = self.create_adder(self.create_running_batch(), page_size=PAGE)
         adder.is_hybrid_swa = True
 
@@ -733,7 +733,7 @@ class TestPrefillAdder(CustomTestCase):
         self.mock_token_allocator.full_available_size.return_value = 100_000
         self.mock_token_allocator.available_size.return_value = 100_000
         self.mock_tree_cache.sliding_window_size = WINDOW
-        self.mock_tree_cache.is_tree_cache.return_value = False
+        self.mock_tree_cache.supports_prefix_sharing.return_value = False
 
         def run(delivered: int, remaining_after_load: int = 100_000):
             self.mock_token_allocator.full_available_size.return_value = 100_000

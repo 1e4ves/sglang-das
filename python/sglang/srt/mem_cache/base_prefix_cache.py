@@ -296,8 +296,8 @@ class MatchResult(NamedTuple):
 def zero_match_result(
     tree_cache, match_result: MatchResult, extra_key: Optional[str] = None
 ) -> MatchResult:
-    if tree_cache.is_chunk_cache():
-        # Chunk caches' match_prefix already returns a miss; no root_node to walk back to.
+    if not tree_cache.supports_prefix_sharing():
+        # match_prefix already returns a miss; no root_node to walk back to.
         return match_result
     root = tree_cache.root_node_handle(extra_key=extra_key)
     return match_result._replace(
@@ -615,11 +615,10 @@ class BasePrefixCache(ABC, PrefixCacheTrait):
         as session-held, including while a request runs on one."""
         return {}
 
-    def is_chunk_cache(self) -> bool:
-        return False
-
-    def is_tree_cache(self) -> bool:
-        return not self.is_chunk_cache()
+    def supports_prefix_sharing(self) -> bool:
+        """Whether a request's prefix stays in the cache for other requests to
+        share, including after the request finishes."""
+        return True
 
     def available_and_evictable_str(self) -> str:
         available_size = self.token_to_kv_pool_allocator.available_size()

@@ -119,7 +119,7 @@ class TestUnifiedRadixAllocationEviction(CustomTestCase):
 
     def test_common_helper_uses_allocation_aware_entry_point(self):
         tree_cache = MagicMock()
-        tree_cache.is_chunk_cache.return_value = False
+        tree_cache.supports_prefix_sharing.return_value = True
         tree_cache.token_to_kv_pool_allocator.available_size.return_value = 30
 
         evict_from_tree_cache(tree_cache, num_tokens=100)

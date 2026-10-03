@@ -439,7 +439,7 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
         # donation) would then drop a lock the request no longer owns. Repoint
         # it at the root -- the same node a miss yields -- so that dec is a
         # no-op, and clear the lock metadata that described the released node.
-        if not self.tree_cache.is_chunk_cache():
+        if self.tree_cache.supports_prefix_sharing():
             req.last_node = self.tree_cache.root_node_handle(
                 extra_key=getattr(req, "extra_key", None)
             )
