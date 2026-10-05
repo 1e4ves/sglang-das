@@ -2233,8 +2233,6 @@ class Scheduler(
             swa_tokens_per_layer=self.swa_tokens_per_layer,
             max_total_num_tokens=self.max_total_num_tokens
             * get_parallel().attn_dcp_size,
-            get_last_batch=lambda: self.last_batch,
-            get_running_batch=lambda: self.running_batch,
         )
 
     def init_invariant_checker(self) -> None:
