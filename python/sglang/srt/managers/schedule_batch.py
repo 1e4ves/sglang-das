@@ -99,8 +99,8 @@ from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
 from sglang.srt.mem_cache.base_prefix_cache import (
     BasePrefixCache,
     CacheRequestHandle,
-    DecLockRefParams,
     MatchPrefixParams,
+    TreeLock,
     zero_match_result,
 )
 from sglang.srt.mem_cache.common import (
@@ -1107,14 +1107,12 @@ class Req(ReqDllmMixin):
         self.host_hit_is_storage = False
         self.storage_prefetch_retry_attempts = 0
         self.staged_prefetch_plan: Optional[StagedPrefetchPlan] = None
-        # Receipt of the tree lock held on last_node (anchor, SWA boundary,
-        # skipped components); every release replays it unchanged.
-        self.lock_receipt: DecLockRefParams = DecLockRefParams()
+        # The tree lock this request holds; None while it runs on a session
+        # slot's record or holds no lock.
+        self.lock: Optional[TreeLock] = None
         # Device/host prefix used to plan the latest L3 lookup. Admission uses
         # it to detect newly exposed storage demand after queue-time eviction.
         self.storage_prefetch_last_match_len: Optional[int] = None
-        # Whether the prefill-time SWA tree lock has been released early
-        self.swa_prefix_lock_released: bool = False
 
         # Whether or not if it is chunked. It increments whenever
         # it is chunked, and decrement whenever chunked request is
@@ -1808,8 +1806,7 @@ class Req(ReqDllmMixin):
         self.kv.cache_protected_len = 0
         self.kv.cache_inserted_len = 0
         self.num_matched_prefix_tokens = 0
-        self.lock_receipt = DecLockRefParams()
-        self.swa_prefix_lock_released = False
+        self.lock = None
         self.swa_branching_seqlen = None
         self.extend_range = None
         self.dllm_initialized = False

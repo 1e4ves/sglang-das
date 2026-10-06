@@ -29,6 +29,7 @@ from sglang.srt.mem_cache.base_prefix_cache import (
     CacheRequestHandle,
     DecLockRefResult,
     IncLockRefResult,
+    TreeLock,
 )
 from sglang.srt.server_args import ServerArgs, set_global_server_args_for_scheduler
 from sglang.srt.utils.common import Range
@@ -77,6 +78,13 @@ class TestPrefillAdder(CustomTestCase):
         tree_cache.disable = False
         tree_cache.inc_lock_ref.return_value = IncLockRefResult()
         tree_cache.dec_lock_ref.return_value = DecLockRefResult()
+        # Route lock/unlock through inc/dec_lock_ref so tests can hook those.
+        tree_cache.lock.side_effect = lambda node: TreeLock(
+            node, tree_cache.inc_lock_ref(node).to_dec_params()
+        )
+        tree_cache.unlock.side_effect = lambda lock: (
+            lock is not None and tree_cache.dec_lock_ref(lock.node, lock.receipt)
+        )
         tree_cache.buffer_pipeline = None
         return tree_cache
 
