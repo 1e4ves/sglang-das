@@ -360,7 +360,7 @@ class TestDecodeQueueCleanup(CustomTestCase):
         )
         mock_prepare_abort.assert_called_once()
         mock_release_kv_cache.assert_called_once_with(
-            req, queue.tree_cache, is_insert=False
+            req, queue.tree_cache, checkpoint=False
         )
 
     def test_retracted_decode_requests_keep_scheduler_non_idle(self):

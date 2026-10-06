@@ -83,8 +83,8 @@ def _result():
     return GenerationBatchResult(next_token_ids=torch.tensor([11]))
 
 
-def _free_req(req, _tree_cache, *, is_insert):
-    assert is_insert is False
+def _free_req(req, _tree_cache, *, checkpoint):
+    assert checkpoint is False
     req.kv.req_pool_idx = None
     req.kv.mark_kv_released()
     req.kv.mamba_pool_idx = None
@@ -100,7 +100,9 @@ def test_aborted_final_result_releases_hybrid_cache(
 
     scheduler.process_batch_result_disagg_prefill(_batch(req), _result())
 
-    release_kv_cache.assert_called_once_with(req, scheduler.tree_cache, is_insert=False)
+    release_kv_cache.assert_called_once_with(
+        req, scheduler.tree_cache, checkpoint=False
+    )
     checkpoint_kv_cache.assert_not_called()
     req.disagg_kv_sender.abort.assert_called_once_with()
     scheduler.req_to_metadata_buffer_idx_allocator.free.assert_called_once_with(7)
@@ -124,7 +126,9 @@ def test_aborted_middle_result_releases_after_last_chunk(release_kv_cache):
     scheduler.process_batch_result_disagg_prefill(_batch(req), _result())
 
     assert req.inflight_middle_chunks == 0
-    release_kv_cache.assert_called_once_with(req, scheduler.tree_cache, is_insert=False)
+    release_kv_cache.assert_called_once_with(
+        req, scheduler.tree_cache, checkpoint=False
+    )
     scheduler.output_streamer.stream_output.assert_called_once_with([req], False)
 
 
@@ -141,7 +145,9 @@ def test_aborted_middle_result_waits_for_inflight_chunk(release_kv_cache):
 
     scheduler.process_batch_result_disagg_prefill(_batch(req), _result())
 
-    release_kv_cache.assert_called_once_with(req, scheduler.tree_cache, is_insert=False)
+    release_kv_cache.assert_called_once_with(
+        req, scheduler.tree_cache, checkpoint=False
+    )
     scheduler.output_streamer.stream_output.assert_called_once_with([req], False)
 
 
@@ -165,7 +171,9 @@ def test_sender_abort_failure_does_not_skip_local_cleanup(release_kv_cache):
 
     scheduler.process_batch_result_disagg_prefill(_batch(req), _result())
 
-    release_kv_cache.assert_called_once_with(req, scheduler.tree_cache, is_insert=False)
+    release_kv_cache.assert_called_once_with(
+        req, scheduler.tree_cache, checkpoint=False
+    )
     scheduler.req_to_metadata_buffer_idx_allocator.free.assert_called_once_with(7)
     scheduler.output_streamer.stream_output.assert_called_once_with([req], False)
     assert req.finished()
@@ -187,7 +195,9 @@ def test_grammar_rejection_retires_prefill_before_transfer(
     req.grammar.accept_token.assert_called_once_with(11)
     assert req.grammar.finished
     assert req.finished()
-    release_kv_cache.assert_called_once_with(req, scheduler.tree_cache, is_insert=False)
+    release_kv_cache.assert_called_once_with(
+        req, scheduler.tree_cache, checkpoint=False
+    )
     checkpoint_kv_cache.assert_not_called()
     scheduler.send_kv_chunk.assert_not_called()
     scheduler.output_streamer.stream_output.assert_called_once_with([req], False)

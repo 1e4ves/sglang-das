@@ -817,7 +817,7 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
                 pass
         req = decode_req.req
         if req.req_pool_idx is not None or getattr(req, "mamba_pool_idx", None) is not None:
-            release_kv_cache(req, self.tree_cache, is_insert=False)
+            release_kv_cache(req, self.tree_cache, checkpoint=False)
         transfer_queue = getattr(self, "transfer_queue", None)
         if transfer_queue is not None:
             transfer_queue._release_pd_hidden_rows(decode_req)
@@ -2184,7 +2184,7 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
             ]
             for decode_req in failed_reqs:
                 if decode_req.req.kv.holds_mamba and not decode_req.req.kv.holds_kv:
-                    release_kv_cache(decode_req.req, self.tree_cache, is_insert=False)
+                    release_kv_cache(decode_req.req, self.tree_cache, checkpoint=False)
 
         self.queue = [
             entry for i, entry in enumerate(self.queue) if i not in indices_to_remove
@@ -2855,7 +2855,7 @@ class DecodeTransferQueue(DecodeHiCacheTransferMixin):
             decode_req.kv_receiver = None
         req = decode_req.req
         if req.req_pool_idx is not None or getattr(req, "mamba_pool_idx", None) is not None:
-            release_kv_cache(req, self.tree_cache, is_insert=False)
+            release_kv_cache(req, self.tree_cache, checkpoint=False)
         self._release_pd_hidden_rows(decode_req)
         self._free_metadata_buffer(decode_req)
 
@@ -3365,7 +3365,7 @@ class DecodeTransferQueue(DecodeHiCacheTransferMixin):
                     indices_to_remove.add(i)
                 else:
                     # release pre-allocated kv cache, but don't insert into the tree since it's failed
-                    release_kv_cache(decode_req.req, self.tree_cache, is_insert=False)
+                    release_kv_cache(decode_req.req, self.tree_cache, checkpoint=False)
                     self._release_pd_hidden_rows(decode_req)
                     decode_req.kv_receiver.clear()
                     decode_req.kv_receiver = None
@@ -3398,7 +3398,7 @@ class DecodeTransferQueue(DecodeHiCacheTransferMixin):
                             decode_req.req
                         )
                     self._clean_hicache_prefetch_resources(decode_req)
-                    release_kv_cache(decode_req.req, self.tree_cache, is_insert=False)
+                    release_kv_cache(decode_req.req, self.tree_cache, checkpoint=False)
                     if self.scheduler.metrics_reporter.enable_metrics:
                         self.scheduler.metrics_collector.increment_transfer_failed_reqs()
                 else:
@@ -3450,7 +3450,7 @@ class DecodeTransferQueue(DecodeHiCacheTransferMixin):
         if self.enable_staging and self.staging_handler.is_staging_room(room):
             self.staging_handler.unregister_decode_req(room)
         # release pre-allocated kv cache, but don't insert into the tree since it's failed
-        release_kv_cache(decode_req.req, self.tree_cache, is_insert=False)
+        release_kv_cache(decode_req.req, self.tree_cache, checkpoint=False)
         self.metadata_buffers.bootstrap_room[idx] = 0
         self.req_to_metadata_buffer_idx_allocator.free(idx)
         decode_req.kv_receiver.kv_mgr.clear_deferred_abort_state(room)
