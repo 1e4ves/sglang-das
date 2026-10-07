@@ -78,7 +78,6 @@ from sglang.srt.managers.schedule_batch import (
     NextBatchPlan,
     ScheduleBatch,
 )
-from sglang.srt.managers.schedule_policy import match_prefix_for_req
 from sglang.srt.managers.utils import GenerationBatchResult
 from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
 from sglang.srt.mem_cache.base_prefix_cache import (
@@ -90,6 +89,7 @@ from sglang.srt.mem_cache.base_prefix_cache import (
 )
 from sglang.srt.mem_cache.common import (
     kv_to_page_indices,
+    match_kv_cache,
     page_align_floor,
     release_kv_cache,
     retraction_discard,
@@ -920,12 +920,11 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
                 result.host_hit_length,
             )
         else:
-            result = match_prefix_for_req(
-                self.tree_cache,
+            result = match_kv_cache(
                 req,
+                self.tree_cache,
                 req.origin_input_ids,
                 cow_mamba=self.tree_cache.supports_mamba(),
-                include_req=True,
             )
         req.lock = self.tree_cache.lock(result.last_device_node)
         return self._build_decode_prefix_match(req, result)
