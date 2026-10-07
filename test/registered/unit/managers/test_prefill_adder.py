@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import functools
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -125,8 +124,7 @@ class TestPrefillAdder(CustomTestCase):
         req.rid = str(rid)
         req.cache_request_handle = CacheRequestHandle(req.rid, 0)
         req.priority = priority
-        req.set_prefix_indices = functools.partial(Req.set_prefix_indices, req)
-        req.set_prefix_indices(torch.empty((0,), dtype=torch.int64))
+        req.prefix_len = 0
         req.full_untruncated_fill_ids = []
         req.output_ids = [0] * output_len
         req.sampling_params = SimpleNamespace(max_new_tokens=max_new_tokens)
@@ -606,8 +604,7 @@ class TestPrefillAdder(CustomTestCase):
         adder.is_hybrid_swa = is_hybrid_swa
 
         req = self.create_mock_req("chunked", priority=0, max_new_tokens=128)
-        req.prefix_indices = []
-        req.prefix_len = len(req.prefix_indices)
+        req.prefix_len = 0
         req.full_untruncated_fill_ids = list(range(extend_input_len))
         # set_extend_range is the only writer of extend_range; the production
         # path reads req.extend_range.length right after calling it, so the mock
@@ -707,8 +704,7 @@ class TestPrefillAdder(CustomTestCase):
         req = self.create_mock_req(
             "resume", priority=0, max_new_tokens=40, output_len=10
         )
-        req.prefix_indices = list(range(PREFIX))
-        req.prefix_len = len(req.prefix_indices)
+        req.prefix_len = PREFIX
         req.full_untruncated_fill_ids = list(range(PREFIX + EXTEND))
         req.host_hit_length = 0
         req.swa_host_hit_length = 0
@@ -753,8 +749,7 @@ class TestPrefillAdder(CustomTestCase):
             adder = self.create_adder(self.create_running_batch(), page_size=PAGE)
             adder.is_hybrid_swa = True
             req = self.create_mock_req("dropped-fetch", priority=0, max_new_tokens=8)
-            req.prefix_indices = torch.empty(0, dtype=torch.int64)
-            req.prefix_len = len(req.prefix_indices)
+            req.prefix_len = 0
             req.full_untruncated_fill_ids = list(range(SPAN))
             req.host_hit_length = HOST_HIT
             req.swa_host_hit_length = WINDOW
@@ -796,7 +791,7 @@ class TestPrefillAdder(CustomTestCase):
         # budget. A successful load must not run admission gates again.
         _, admitted, req = run(HOST_HIT + 4, remaining_after_load=0)
         self.assertEqual(len(admitted), 1)
-        self.assertEqual(len(req.prefix_indices), HOST_HIT + 4)
+        self.assertEqual(req.prefix_len, HOST_HIT + 4)
         self.assertEqual(req.kv.cache_protected_len, HOST_HIT + 4)
         req.set_extend_range.assert_called_once_with(HOST_HIT + 4, SPAN)
         # A partial FULL load stays fatal.
@@ -805,8 +800,7 @@ class TestPrefillAdder(CustomTestCase):
 
     def _create_host_hit_req(self, *, prefix_len=0, host_hit=8192, tail=1024):
         req = self._create_delayer_req(prefix_len + host_hit + tail)
-        req.prefix_indices = torch.arange(prefix_len)
-        req.prefix_len = len(req.prefix_indices)
+        req.prefix_len = prefix_len
         req.host_hit_length = host_hit
         req.needs_host_load_back.return_value = True
         req.best_match_node = req.last_node

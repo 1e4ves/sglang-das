@@ -907,19 +907,18 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
             if envs.SGLANG_RADIX_FORCE_MISS.get():
                 result = zero_match_result(self.tree_cache, result)
             (
-                req.prefix_indices,
+                req.prefix_len,
                 req.last_node,
                 req.last_host_node,
                 req.best_match_node,
                 req.host_hit_length,
             ) = (
-                result.device_indices,
+                len(result.device_indices),
                 result.last_device_node,
                 result.last_host_node,
                 result.best_match_node,
                 result.host_hit_length,
             )
-            req.prefix_len = len(req.prefix_indices)
         else:
             result = match_kv_cache(
                 req,
@@ -2517,13 +2516,9 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
             req.dsv4_decode_radix_cache_prompt_len = req.kv.kv_committed_len
             req.dsv4_decode_radix_cache_prompt_once = True
             req.skip_radix_cache_insert = True
-        # Set prefix_indices so downstream consumers (init_next_round_input,
-        # prepare_for_extend) see the correct prefix length. In the agg path
-        # this is done inside init_next_round_input, but decode-disagg needs
-        # allocation info before batch assembly so we set it here.
-        req.set_prefix_indices(
-            prefix_indices if prefix_len > 0 else torch.empty((0,), dtype=torch.int64)
-        )
+        # Decode-disagg allocates before batch assembly, so it binds the prefix
+        # here instead of in init_next_round_input.
+        req.prefix_len = prefix_len
         req.set_extend_range(total_prefix_len, req.kv.kv_committed_len)
         self.tree_cache.maybe_hand_to_session(req)
 
