@@ -234,6 +234,7 @@ class TestPrepareEncoderInfoExtendOutOfPlace(unittest.TestCase):
             rid="img",
             multimodal_inputs=types.SimpleNamespace(num_image_tokens=2),
             prefix_indices=[],
+            prefix_len=0,
             extend_range=Range(0, 5),
             logprob_start_len=0,
         )
@@ -241,6 +242,7 @@ class TestPrepareEncoderInfoExtendOutOfPlace(unittest.TestCase):
             rid="txt",
             multimodal_inputs=None,
             prefix_indices=[],
+            prefix_len=0,
             extend_range=Range(0, 4),
             logprob_start_len=0,
         )

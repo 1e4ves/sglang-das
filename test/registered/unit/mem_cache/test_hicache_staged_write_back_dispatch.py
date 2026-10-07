@@ -9,6 +9,7 @@ from unittest import mock
 import torch
 
 from sglang.srt.managers.cache_controller import CacheOperation, HiCacheController
+from sglang.srt.managers.schedule_batch import Req
 from sglang.srt.mem_cache import l2_transfer as transfer_module
 from sglang.srt.mem_cache.base_prefix_cache import CacheRequestHandle
 from sglang.srt.mem_cache.buffer_mode.pipeline import BufferModePipeline
@@ -34,7 +35,12 @@ from sglang.srt.mem_cache.pool_host.mla import MLATokenToKVPoolHost
 from sglang.test.ci.ci_register import register_cpu_ci
 from sglang.test.test_utils import CustomTestCase
 
-register_cpu_ci(est_time=3, suite="base-a-test-cpu")
+
+class _ReqStub(SimpleNamespace):
+    set_prefix_indices = Req.set_prefix_indices
+
+
+register_cpu_ci(est_time=10, suite="base-a-test-cpu")
 
 MEMORY_POOL_HOST_MODULE = "sglang.srt.mem_cache.memory_pool_host"
 DSA_POOL_HOST_MODULE = "sglang.srt.mem_cache.pool_host.dsa"
@@ -307,10 +313,11 @@ class TestHiCacheStagedWriteBackDispatch(CustomTestCase):
         pipeline._cache.tree_core.collect_full_device_indices.return_value = _indices(
             0, 6
         )
-        req = SimpleNamespace(
+        req = _ReqStub(
             rid="r",
             cache_request_handle=handle,
             prefix_indices=_indices(0, 0),
+            prefix_len=0,
             kv=SimpleNamespace(cache_protected_len=0),
         )
         self.assertTrue(pipeline.prepare_staged_prefetch(req))
@@ -323,10 +330,11 @@ class TestHiCacheStagedWriteBackDispatch(CustomTestCase):
         pipeline._cache.tree_core.collect_full_device_indices.return_value = _indices(
             0, 6
         )
-        req = SimpleNamespace(
+        req = _ReqStub(
             rid="r",
             cache_request_handle=handle,
             prefix_indices=_indices(0, 0),
+            prefix_len=0,
             kv=SimpleNamespace(cache_protected_len=0),
         )
         self.assertTrue(pipeline.prepare_staged_prefetch(req))

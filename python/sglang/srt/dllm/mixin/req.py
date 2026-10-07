@@ -45,7 +45,7 @@ class ReqDllmMixin:
             self.dllm_phase = DllmReqPhase.STAGING_DECODE
             return
 
-        prefix_length = len(self.prefix_indices)
+        prefix_length = self.prefix_len
         min_required_length = prefix_length + self.dllm_config.block_size
 
         if len(self.full_untruncated_fill_ids) < min_required_length:
@@ -62,7 +62,7 @@ class ReqDllmMixin:
 
     def _init_fill_ids_for_dllm(self: Req):
         if self.dllm_incomplete_ids:
-            prefix_len = len(self.prefix_indices)
+            prefix_len = self.prefix_len
             assert len(self.dllm_incomplete_ids) == self.dllm_config.block_size
             self.full_untruncated_fill_ids = (
                 self.full_untruncated_fill_ids[:prefix_len] + self.dllm_incomplete_ids
@@ -85,7 +85,7 @@ class ReqDllmMixin:
         self.dllm_initialized = True
 
     def _update_block_offset_for_dllm(self):
-        prefix_len = len(self.prefix_indices)
+        prefix_len = self.prefix_len
         assert (
             prefix_len % self.dllm_config.block_size == 0
         ), f"Unexpected prefix len: {prefix_len}"

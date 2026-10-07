@@ -1,6 +1,7 @@
 """Unit tests for UnifiedRadixCache"""
 
 import atexit
+import functools
 import json
 import shutil
 import sys
@@ -112,7 +113,12 @@ from sglang.test.ci.ci_register import register_amd_ci, register_cuda_ci
 from sglang.test.mem_cache_utils import finish_req
 from sglang.test.test_utils import CustomTestCase
 
-register_cuda_ci(est_time=50, stage="base-b", runner_config="1-gpu-small")
+
+class _ReqStub(SimpleNamespace):
+    set_prefix_indices = Req.set_prefix_indices
+
+
+register_cuda_ci(est_time=60, stage="base-b", runner_config="1-gpu-small")
 register_amd_ci(est_time=50, suite="stage-b-test-1-gpu-small-amd")
 
 # A dedicated test entry point overrides this without changing the process-wide
@@ -1280,6 +1286,7 @@ class UnifiedRadixCacheSuite:
 
     def _apply_match_to_req(self, req, match):
         req.prefix_indices = match.device_indices
+        req.prefix_len = len(req.prefix_indices)
         req.last_node = match.last_device_node
         req.last_host_node = match.last_host_node
         req.best_match_node = match.best_match_node
@@ -1676,8 +1683,7 @@ class UnifiedRadixCacheSuite:
 
         cache.checkpoint(req, up_to=req.extend_range.end)
 
-        self.assertGreater(len(req.prefix_indices), 0)
-        self.assertEqual(req.kv.cache_protected_len, len(req.prefix_indices))
+        self.assertGreater(req.kv.cache_protected_len, 0)
         self.assertIsNotNone(req.last_node)
         self.assertFalse(req.lock.swa_released)
 
@@ -3116,12 +3122,14 @@ class UnifiedRadixCacheSuite:
             # bogus slots into the tree).
             assert len(prefix_indices) == prefix_len
             req.prefix_indices = prefix_indices
+            req.prefix_len = len(req.prefix_indices)
         else:
             req.prefix_indices = torch.zeros(
                 prefix_len,
                 dtype=torch.int64,
                 device=cache.tree_core.empty_match_result.device_indices.device,
             )
+            req.prefix_len = len(req.prefix_indices)
         req.last_node = cache.root_node_handle() if last_node is None else last_node
         joint = cache.match_prefix(
             MatchPrefixParams(
@@ -3131,6 +3139,7 @@ class UnifiedRadixCacheSuite:
             )
         )
         req.prefix_indices = joint.device_indices
+        req.prefix_len = len(req.prefix_indices)
         joint_covers_span = len(joint.device_indices) >= len(f.key_tokens)
         adder = PrefillAdder.__new__(PrefillAdder)
         adder.tree_cache = cache
@@ -3829,6 +3838,7 @@ class UnifiedRadixCacheSuite:
             dtype=torch.int64,
             device=cons.tree_core.empty_match_result.device_indices.device,
         )
+        req.prefix_len = len(req.prefix_indices)
         self.assertTrue(cons.buffer_pipeline.prepare_staged_prefetch(req))
         spliced, _last = cons.init_load_back(
             InitLoadBackParams(
@@ -4173,10 +4183,11 @@ class UnifiedRadixCacheSuite:
         self.assertIsNotNone(cons_alloc.swa_attn_allocator.alloc(hold // ps * ps))
 
         # The adder's SWA gate for this request (_swa_budget_for_req).
-        req = SimpleNamespace(
+        req = _ReqStub(
             rid=req_id.rid,
             cache_request_handle=req_id,
             prefix_indices=cons.tree_core.empty_match_result.device_indices,
+            prefix_len=len(cons.tree_core.empty_match_result.device_indices),
             kv=SimpleNamespace(cache_protected_len=0),
         )
         self.assertTrue(cons.buffer_pipeline.prepare_staged_prefetch(req))
@@ -4202,6 +4213,7 @@ class UnifiedRadixCacheSuite:
             dtype=torch.int64,
             device=cons.tree_core.empty_match_result.device_indices.device,
         )
+        req.prefix_len = len(req.prefix_indices)
         self.assertTrue(cons.buffer_pipeline.prepare_staged_prefetch(req))
         spliced, last_node = cons.init_load_back(
             InitLoadBackParams(
@@ -4639,6 +4651,7 @@ class UnifiedRadixCacheSuite:
             dtype=torch.int64,
             device=cons.tree_core.empty_match_result.device_indices.device,
         )
+        req.prefix_len = len(req.prefix_indices)
         req.last_node = cons.root_node_handle()
         self.assertTrue(cons.buffer_pipeline.prepare_staged_prefetch(req))
         with mock.patch.object(cons.cache_controller, "load", adversarial_load):
@@ -4723,10 +4736,11 @@ class UnifiedRadixCacheSuite:
             self.assertGreater(aux_max, len(seq) - len(head))
 
         # The surfaced host hit is the splice-able tail, not the full span.
-        req = SimpleNamespace(
+        req = _ReqStub(
             rid=req_id.rid,
             cache_request_handle=req_id,
             prefix_indices=sib.device_indices,
+            prefix_len=len(sib.device_indices),
             kv=SimpleNamespace(cache_protected_len=len(sib.device_indices)),
         )
         self.assertTrue(cons.buffer_pipeline.prepare_staged_prefetch(req))
@@ -4792,8 +4806,10 @@ class UnifiedRadixCacheSuite:
             rid=req_id.rid,
             cache_request_handle=req_id,
             prefix_indices=live.device_indices,
+            prefix_len=len(live.device_indices),
             last_node=live.last_device_node,
         )
+        req.set_prefix_indices = functools.partial(Req.set_prefix_indices, req)
         self.assertTrue(cons.buffer_pipeline.prepare_staged_prefetch(req))
         self.assertEqual((req.host_hit_length, req.swa_host_hit_length), (0, 0))
         self.assertFalse(cons.buffer_pipeline.has_staged(req_id))

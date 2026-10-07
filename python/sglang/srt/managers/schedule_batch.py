@@ -1075,8 +1075,14 @@ class Req(ReqDllmMixin):
         self.mm_video_tokens: int = 0
 
         # Prefix info
-        # The indices to kv cache for the shared prefix.
-        self.prefix_indices: torch.Tensor = torch.empty((0,), dtype=torch.int64)
+        # Tokens [0, prefix_len) are already in the row or come from a match;
+        # the next extend starts at prefix_len.
+        self.prefix_len: int = 0
+        # The matched prefix's KV indices, consumed when the next allocation
+        # writes them into the row; None once written.
+        self.prefix_indices: Optional[torch.Tensor] = torch.empty(
+            (0,), dtype=torch.int64
+        )
         # TODO(ispobock): rename to last_device_node
         self.last_node: Any = None
         self.last_host_node: Any = None
@@ -1089,7 +1095,7 @@ class Req(ReqDllmMixin):
         # match, it will be the tracked seqlen in the ping pong buffer for the
         # right prefill pass.
         self.mamba_branching_seqlen: Optional[int] = None
-        # Total cached prefix length (on-device prefix_indices + host_hit_length),
+        # Total cached prefix length (on-device prefix_len + host_hit_length),
         # capped at the max allowed prefix. Set during prefix matching at schedule
         # time and used to estimate uncached tokens / sort by longest prefix for
         # load reporting.
@@ -1391,6 +1397,10 @@ class Req(ReqDllmMixin):
     def set_extend_range(self, start: int, end: int) -> None:
         self.extend_range = Range(start, end)
 
+    def set_prefix_indices(self, prefix_indices: torch.Tensor) -> None:
+        self.prefix_indices = prefix_indices
+        self.prefix_len = len(prefix_indices)
+
     def get_fill_ids(self) -> array:
         return self.full_untruncated_fill_ids[: self.extend_range.end]
 
@@ -1466,7 +1476,7 @@ class Req(ReqDllmMixin):
             )
             self.mamba_branching_seqlen = match_result.mamba_branching_seqlen
             if match_result.cache_protected_len is None:
-                self.kv.cache_protected_len = len(self.prefix_indices)
+                self.kv.cache_protected_len = self.prefix_len
 
             if self.is_dllm():
                 self._update_block_offset_for_dllm()
@@ -1750,7 +1760,7 @@ class Req(ReqDllmMixin):
         # since we are tracking the total number of retractions for each request.
         self.retraction_count += 1
 
-        self.prefix_indices = torch.empty((0,), dtype=torch.int64)
+        self.set_prefix_indices(torch.empty((0,), dtype=torch.int64))
         self.routed_experts = None
         self.indexer_topk = None
         self.last_node = None
@@ -2364,7 +2374,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                 encoder_lens_cpu.append(im.num_image_tokens)
                 encoder_cached.append(
                     self.forward_mode.is_decode()
-                    or len(req.prefix_indices) >= im.num_image_tokens
+                    or req.prefix_len >= im.num_image_tokens
                 )
         self.encoder_lens_cpu = encoder_lens_cpu
         self.encoder_cached = encoder_cached
@@ -2383,9 +2393,9 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             encoder_len = self.encoder_lens_cpu[i]
             seq_lens[i] -= encoder_len
 
-            if len(req.prefix_indices) < encoder_len:
+            if req.prefix_len < encoder_len:
                 # NOTE: the encoder part should be considered as a whole
-                assert len(req.prefix_indices) == 0
+                assert req.prefix_len == 0
                 input_ids[i] = input_ids[i][encoder_len:]
                 encoder_out_cache_loc.append(self.out_cache_loc[pt : pt + encoder_len])
                 decoder_out_cache_loc.append(
@@ -2439,7 +2449,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                 old_start_len = extend_logprob_start_lens[i]
                 old_contribution = req.extend_range.length - old_start_len
 
-                if len(req.prefix_indices) < encoder_len:
+                if req.prefix_len < encoder_len:
                     tokens_to_strip = max(0, encoder_len - old_start_len)
                     new_token_ids_parts.append(
                         self.extend_input_logprob_token_ids[
@@ -2466,8 +2476,8 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             encoder_len = self.encoder_lens_cpu[i]
             if encoder_len == 0:
                 continue
-            if len(req.prefix_indices) < encoder_len:
-                assert len(req.prefix_indices) == 0
+            if req.prefix_len < encoder_len:
+                assert req.prefix_len == 0
                 req.extend_range = req.extend_range._replace(
                     start=req.extend_range.start + encoder_len
                 )
@@ -2482,11 +2492,11 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
         # Init tensors
         reqs = self.reqs
-        input_ids = [r.get_fill_ids()[len(r.prefix_indices) :] for r in reqs]
+        input_ids = [r.get_fill_ids()[r.prefix_len :] for r in reqs]
         extend_num_tokens = sum(len(ids) for ids in input_ids)
         seq_lens = [r.extend_range.end for r in reqs]
         orig_seq_lens = [max(r.extend_range.end, len(r.origin_input_ids)) for r in reqs]
-        prefix_lens = [len(r.prefix_indices) for r in reqs]
+        prefix_lens = [r.prefix_len for r in reqs]
         extend_lens = [r.extend_range.length for r in reqs]
         extend_logprob_start_lens = [
             compute_extend_logprob_start_len(
@@ -2589,7 +2599,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                         req.cached_tokens_host,
                         req.cached_tokens_storage,
                     ) = split_cached_prefix_by_tier(
-                        prefix_len=len(req.prefix_indices),
+                        prefix_len=req.prefix_len,
                         host_hit_len=req.materialized_host_hit_len(),
                         storage_hit_len=req.storage_hit_length,
                         storage_hit_start=req.storage_hit_start,
@@ -2621,7 +2631,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                 # get_fill_ids() = [3, 4]
                 # extend_input_logprob_token_id = [4, 0]
                 global_start_idx, global_end_idx = (
-                    len(req.prefix_indices),
+                    req.prefix_len,
                     req.extend_range.end,
                 )
                 if req.logprob_start_len == -1:
@@ -2747,10 +2757,10 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
         def _force_track_h(i: int) -> int:
             # h is indexed relative to the extend start, so check that offset.
-            assert (i - len(req.prefix_indices)) % chunk_size == 0, (
+            assert (i - req.prefix_len) % chunk_size == 0, (
                 f"The force track calculation only handles last-position or "
                 f"unaligned seqlens, so it needs a chunk-aligned offset to "
-                f"start from. But i={i} prefix_len={len(req.prefix_indices)} "
+                f"start from. But i={i} prefix_len={req.prefix_len} "
                 f"chunk_size={chunk_size} checkpoint_grid={checkpoint_grid}"
             )
             # There are 3 cases for mamba_track_seqlen passed to mamba_track_seqlens_cpu:
@@ -2789,7 +2799,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             # checkpoint_grid is coarser than chunk_size, we need to force the math calculation to
             # retrieve the correct mamba state from h by _force_track_h()
             mamba_track_fla_chunk_aligned = (
-                len(req.prefix_indices)
+                req.prefix_len
                 + (req.extend_range.length // chunk_size) * chunk_size
             )
             if mamba_track_fla_chunk_aligned != mamba_track_seqlen_aligned:
@@ -2811,10 +2821,10 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                 # track branching point in this forward if the branching point
                 # is within the current extend batch.
                 branching_seqlen_aligned_mask = (
-                    req.mamba_branching_seqlen - len(req.prefix_indices)
+                    req.mamba_branching_seqlen - req.prefix_len
                 ) % chunk_size == 0
                 if (
-                    req.mamba_branching_seqlen > len(req.prefix_indices)
+                    req.mamba_branching_seqlen > req.prefix_len
                     and req.mamba_branching_seqlen < mamba_track_seqlen
                     and branching_seqlen_aligned_mask
                 ):

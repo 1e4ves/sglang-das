@@ -919,6 +919,7 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
                 result.best_match_node,
                 result.host_hit_length,
             )
+            req.prefix_len = len(req.prefix_indices)
         else:
             result = match_kv_cache(
                 req,
@@ -2513,14 +2514,14 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
             # until the prebuilt forward has finished; process_prebuilt() runs
             # before forward and must not free duplicate prompt pages still
             # referenced by the current batch's out_cache_loc.
-            req.dsv4_decode_radix_cache_prompt_len = req.kv_committed_len
+            req.dsv4_decode_radix_cache_prompt_len = req.kv.kv_committed_len
             req.dsv4_decode_radix_cache_prompt_once = True
             req.skip_radix_cache_insert = True
         # Set prefix_indices so downstream consumers (init_next_round_input,
         # prepare_for_extend) see the correct prefix length. In the agg path
         # this is done inside init_next_round_input, but decode-disagg needs
         # allocation info before batch assembly so we set it here.
-        req.prefix_indices = (
+        req.set_prefix_indices(
             prefix_indices if prefix_len > 0 else torch.empty((0,), dtype=torch.int64)
         )
         req.set_extend_range(total_prefix_len, req.kv.kv_committed_len)
@@ -3673,9 +3674,7 @@ class SchedulerDisaggregationDecodeMixin:
                 # only sees committed KV (full array includes one uncommitted
                 # token because init_next_round_input rebuilt it as full).
                 if req.kv.kv_committed_len is not None:
-                    req.set_extend_range(
-                        len(req.prefix_indices), req.kv.kv_committed_len
-                    )
+                    req.set_extend_range(req.prefix_len, req.kv.kv_committed_len)
             else:
                 waiting_queue.append(req)
 

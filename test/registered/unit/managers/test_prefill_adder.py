@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -124,7 +125,8 @@ class TestPrefillAdder(CustomTestCase):
         req.rid = str(rid)
         req.cache_request_handle = CacheRequestHandle(req.rid, 0)
         req.priority = priority
-        req.prefix_indices = []
+        req.set_prefix_indices = functools.partial(Req.set_prefix_indices, req)
+        req.set_prefix_indices(torch.empty((0,), dtype=torch.int64))
         req.full_untruncated_fill_ids = []
         req.output_ids = [0] * output_len
         req.sampling_params = SimpleNamespace(max_new_tokens=max_new_tokens)
@@ -605,6 +607,7 @@ class TestPrefillAdder(CustomTestCase):
 
         req = self.create_mock_req("chunked", priority=0, max_new_tokens=128)
         req.prefix_indices = []
+        req.prefix_len = len(req.prefix_indices)
         req.full_untruncated_fill_ids = list(range(extend_input_len))
         # set_extend_range is the only writer of extend_range; the production
         # path reads req.extend_range.length right after calling it, so the mock
@@ -705,6 +708,7 @@ class TestPrefillAdder(CustomTestCase):
             "resume", priority=0, max_new_tokens=40, output_len=10
         )
         req.prefix_indices = list(range(PREFIX))
+        req.prefix_len = len(req.prefix_indices)
         req.full_untruncated_fill_ids = list(range(PREFIX + EXTEND))
         req.host_hit_length = 0
         req.swa_host_hit_length = 0
@@ -750,6 +754,7 @@ class TestPrefillAdder(CustomTestCase):
             adder.is_hybrid_swa = True
             req = self.create_mock_req("dropped-fetch", priority=0, max_new_tokens=8)
             req.prefix_indices = torch.empty(0, dtype=torch.int64)
+            req.prefix_len = len(req.prefix_indices)
             req.full_untruncated_fill_ids = list(range(SPAN))
             req.host_hit_length = HOST_HIT
             req.swa_host_hit_length = WINDOW
@@ -801,6 +806,7 @@ class TestPrefillAdder(CustomTestCase):
     def _create_host_hit_req(self, *, prefix_len=0, host_hit=8192, tail=1024):
         req = self._create_delayer_req(prefix_len + host_hit + tail)
         req.prefix_indices = torch.arange(prefix_len)
+        req.prefix_len = len(req.prefix_indices)
         req.host_hit_length = host_hit
         req.needs_host_load_back.return_value = True
         req.best_match_node = req.last_node
