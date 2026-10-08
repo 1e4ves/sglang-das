@@ -770,7 +770,7 @@ class TestPrefillAdder(CustomTestCase):
                 )
                 if remaining_after_load == 0:
                     self.mock_token_allocator.swa_available_size.return_value = 0
-                return torch.arange(delivered, dtype=torch.int64), req.last_node
+                return delivered, req.last_node
 
             self.mock_tree_cache.init_load_back.side_effect = load_back
             verdict = adder.add_one_req(
@@ -862,7 +862,7 @@ class TestPrefillAdder(CustomTestCase):
                     self.assertIs(params.req, req)
                     tile_gate.assert_called_once()
                     tile_gate.return_value = AddReqResult.OTHER
-                    return torch.arange(host_hit), restored_node
+                    return host_hit, restored_node
 
                 self.mock_tree_cache.init_load_back.side_effect = load_back
                 with patch.object(

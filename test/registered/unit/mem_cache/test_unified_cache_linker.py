@@ -375,14 +375,14 @@ class TestUnifiedCacheLinkerPythonBackend(_TreeCoreBackendTestMixin, _InsertWalk
         self.assertEqual(match.host_hit_length, len(tokens))
         self._apply_match_to_req(req, match)
 
-        loaded, loaded_node = consumer.init_load_back(
+        loaded_len, loaded_node = consumer.init_load_back(
             InitLoadBackParams(
                 best_match_node=match.best_match_node,
                 host_hit_length=match.host_hit_length,
                 req=req,
             )
         )
-        self.assertEqual(loaded.numel(), len(tokens))
+        self.assertEqual(loaded_len, len(tokens))
         self.assertNotEqual(loaded_node, consumer.root_node_handle())
         (kv_load,) = consumer_linker.queued_loads[req.rid]
         self.assertEqual(kv_load.name, PoolName.KV)
@@ -562,14 +562,15 @@ class TestUnifiedCacheLinkerPythonBackend(_TreeCoreBackendTestMixin, _InsertWalk
         ].clone()
         raced_swa = consumer_allocator.translate_loc_from_full_to_swa(raced_full)
 
-        loaded, loaded_node = consumer.init_load_back(
+        loaded_len, loaded_node = consumer.init_load_back(
             InitLoadBackParams(
                 best_match_node=match.best_match_node,
                 host_hit_length=match.host_hit_length,
                 req=req,
             )
         )
-        self.assertEqual(loaded.numel(), 2)
+        self.assertEqual(loaded_len, 2)
+        loaded = consumer.path_device_indices(loaded_node)[-loaded_len:]
         self.assertTrue(torch.equal(loaded[:1], raced_full))
         load_by_pool = {
             transfer.name: transfer
