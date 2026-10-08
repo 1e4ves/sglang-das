@@ -370,7 +370,7 @@ class UnifiedTreeCoreInterface(ABC):
 
     @abstractmethod
     def match_prefix(self, params: MatchPrefixParams) -> MatchResult:
-        """Match a key against the tree; returns device indices + boundary NodeIds."""
+        """Match a key; returns the device prefix length + boundary NodeIds."""
         ...
 
     @abstractmethod
@@ -395,7 +395,13 @@ class UnifiedTreeCoreInterface(ABC):
     @property
     @abstractmethod
     def empty_match_result(self) -> MatchResult:
-        """A shared empty MatchResult (empty device indices + boundary NodeIds)."""
+        """A shared empty MatchResult (zero device prefix + boundary NodeIds)."""
+        ...
+
+    @property
+    @abstractmethod
+    def empty_device_indices(self) -> torch.Tensor:
+        """A shared empty device-index tensor on the core's device."""
         ...
 
     @abstractmethod

@@ -122,7 +122,7 @@ class C128SidecarComponent(TreeComponent):
             else self.allocator.c128_attn_allocator.free_pages.new_empty((0,))
         )
         group_tokens = 128 * self.allocator.c128_attn_allocator.page_size
-        assert pages.numel() == len(result.device_indices) // group_tokens
+        assert pages.numel() == result.device_prefix_len // group_tokens
         self.cache.req_to_token_pool.set_c128_prefix_pages(req, pages)
         return result
 

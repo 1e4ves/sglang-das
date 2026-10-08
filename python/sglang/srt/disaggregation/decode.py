@@ -913,7 +913,7 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
                 req.best_match_node,
                 req.host_hit_length,
             ) = (
-                len(result.device_indices),
+                result.device_prefix_len,
                 result.last_device_node,
                 result.last_host_node,
                 result.best_match_node,
