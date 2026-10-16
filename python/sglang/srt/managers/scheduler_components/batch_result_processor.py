@@ -585,7 +585,9 @@ class SchedulerBatchResultProcessor:
         extend_logprob_start_len_per_req: Optional[List[int]],
         next_token_ids: List[int],
         logprob_pt: int,
+        store: bool = True,
     ) -> int:
+        """Advance the logprob cursor, optionally storing this request's values."""
         assert extend_logprob_start_len_per_req is not None
         assert extend_input_len_per_req is not None
         extend_logprob_start_len = extend_logprob_start_len_per_req[i]
@@ -597,7 +599,7 @@ class SchedulerBatchResultProcessor:
             extend_logprob_start_len,
         )
 
-        if req.return_logprob:
+        if store and req.return_logprob:
             self.logprob_result_processor.add_logprob_return_values(
                 i,
                 req,
