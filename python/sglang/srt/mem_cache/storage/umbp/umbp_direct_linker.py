@@ -22,9 +22,6 @@ from sglang.srt.mem_cache.hicache_storage import (
 from sglang.srt.mem_cache.hybrid_cache.linker_pool_assembler import (
     resolve_hybrid_device_pool_group,
 )
-from sglang.srt.mem_cache.unified_cache.linker_fault_injection import (
-    arm_load_failure_injection,
-)
 from sglang.srt.mem_cache.unified_cache.unified_cache_linker import UnifiedCacheLinker
 from sglang.srt.runtime_context import get_memory, get_model
 from sglang.srt.utils import freeze_gc, get_device_module
@@ -72,8 +69,6 @@ class LayerWiseLoadCounter:
         self._producer_index = -1
         self.consumer_index = -1
         self._futures: dict[int, list[Future]] = {}
-        # Batch indices already logged: one line per failed load, not per layer.
-        self._reported: set[int] = set()
 
     def update_producer(self) -> int:
         self._producer_index += 1
@@ -87,13 +82,9 @@ class LayerWiseLoadCounter:
         self._futures[index][layer].set_result(None)
 
     def fail(self, index: int, error: BaseException) -> None:
-        # A private copy, because wait_until clears the traceback of what it
-        # catches and the caller still needs its own exception for the
-        # logger.exception() that follows.
-        failure = RuntimeError(f"{type(error).__name__}: {error}")
         for future in self._futures.get(index, ()):
             if not future.done():
-                future.set_exception(failure)
+                future.set_exception(error)
 
     def wait_until(self, threshold: int) -> None:
         index = self.consumer_index
@@ -103,34 +94,15 @@ class LayerWiseLoadCounter:
         try:
             futures[threshold].result()
         except BaseException as error:
-            # Never raise: this runs inside the model forward, where nothing
-            # catches before the scheduler's top-level handler and the whole
-            # engine goes down. The failure travels out through
-            # pop_completed_load(), which aborts the affected requests.
-            if index not in self._reported:
-                self._reported.add(index)
-                logger.error(
-                    "UMBP layer-wise KV load failed for batch %d; affected "
-                    "requests will be aborted after this forward: %s",
-                    index,
-                    error,
-                )
-            # Every layer re-raises this same exception object, and each
-            # appended traceback entry roots a frame chain that pins that
-            # layer's activations: +31.9 GiB on one faulted 61-layer forward at
-            # --chunked-prefill-size 2048, until the engine OOMed. Nothing
-            # reads the traceback.
-            error.__traceback__ = None
+            raise RuntimeError("UMBP layer-wise KV load failed.") from error
         finally:
             if threshold == self.num_layers - 1:
                 self._futures.pop(index, None)
-                self._reported.discard(index)
 
     def reset(self) -> None:
         self._producer_index = -1
         self.consumer_index = -1
         self._futures.clear()
-        self._reported.clear()
 
 
 @dataclass
@@ -232,7 +204,6 @@ class UMBPDirectLinker(UnifiedCacheLinker):
         tp_rank = 0
         if distributed:
             tp_rank = torch.distributed.get_rank(group=params.tp_cache_group)
-        self.tp_rank = tp_rank
         self.pool_group = resolve_hybrid_device_pool_group(
             kvcache=kvcache,
             page_size=self.page_size,
@@ -398,9 +369,7 @@ class UMBPDirectLinker(UnifiedCacheLinker):
         self._load_queue: Queue[
             tuple[int, list[str], list[_PoolRangePlan], object] | None
         ] = Queue()
-        # (rids, success) per started load batch. Pushed from a finally so a
-        # failed batch still releases the tree-side locks it pinned.
-        self._completed_loads: Queue[tuple[list[str], bool]] = Queue()
+        self._completed_loads: Queue[list[str]] = Queue()
         self._offload_queue: Queue[tuple[list[PoolTransfer], object] | None] = Queue()
         self._offload_results: Queue[bool] = Queue()
         self._stats = {
@@ -558,10 +527,9 @@ class UMBPDirectLinker(UnifiedCacheLinker):
         return False
 
     def num_completed_loads(self) -> int:
-        # The tree agrees on the drain count across ranks before calling pop.
         return self._completed_loads.qsize()
 
-    def pop_completed_load(self) -> tuple[list[str], bool]:
+    def pop_completed_load(self) -> list[str]:
         return self._completed_loads.get_nowait()
 
     def start_layer_wise_loading(self) -> int:
@@ -717,15 +685,10 @@ class UMBPDirectLinker(UnifiedCacheLinker):
                 if task is None:
                     return
                 counter_index, rids, plans, ready_event = task
-                success = False
                 try:
-                    success = self._run_layer_wise_batch(
-                        counter_index, plans, ready_event
-                    )
+                    self._run_layer_wise_batch(counter_index, plans, ready_event)
                 finally:
-                    # In a finally so the tree always gets its batch back and
-                    # can release the node locks the load pinned.
-                    self._completed_loads.put((rids, success))
+                    self._completed_loads.put(rids)
             finally:
                 self._load_queue.task_done()
 
@@ -858,8 +821,7 @@ class UMBPDirectLinker(UnifiedCacheLinker):
 
     def _run_layer_wise_batch(
         self, counter_index: int, plans: list[_PoolRangePlan], ready_event: object
-    ) -> bool:
-        maybe_fail = arm_load_failure_injection(self.tp_rank)
+    ) -> None:
         try:
             ready_event.synchronize()
             by_layer: dict[int, list[_PoolRangePlan]] = defaultdict(list)
@@ -874,15 +836,9 @@ class UMBPDirectLinker(UnifiedCacheLinker):
                         continue
                     ptrs, sizes, offsets = meta
                     step = self._entries_per_call(sizes)
-                    where = (
-                        f"layer={group[0]}"
-                        if len(group) == 1
-                        else f"layers={group[0]}..{group[-1]}"
-                    )
                     for start in range(0, len(plan.keys), step):
                         end = start + step
                         chunk_keys = plan.keys[start:end]
-                        maybe_fail(plan.name, where)
                         results = list(
                             self.storage.client.batch_get_ranges_into_ptr(
                                 chunk_keys,
@@ -892,6 +848,11 @@ class UMBPDirectLinker(UnifiedCacheLinker):
                             )
                         )
                         if len(results) != len(chunk_keys) or not all(results):
+                            where = (
+                                f"layer={group[0]}"
+                                if len(group) == 1
+                                else f"layers={group[0]}..{group[-1]}"
+                            )
                             raise RuntimeError(
                                 f"UMBP get failed for pool={plan.name}, {where}: "
                                 f"success={sum(bool(value) for value in results)}/"
@@ -902,11 +863,9 @@ class UMBPDirectLinker(UnifiedCacheLinker):
                 # granularity for fewer times each object is named on the wire.
                 for logical_layer in group:
                     self.layer_done_counter.complete(counter_index, logical_layer)
-            return True
         except BaseException as error:
             self.layer_done_counter.fail(counter_index, error)
             logger.exception("UMBP layer-wise load batch failed")
-            return False
 
     def _layer_groups(self) -> list[list[int]]:
         return [
@@ -1058,12 +1017,16 @@ class UMBPDirectLinker(UnifiedCacheLinker):
         self._pending.clear()
         self._load_queue.join()
         self._offload_queue.join()
-        for queue in (self._offload_results, self._completed_loads):
-            while True:
-                try:
-                    queue.get_nowait()
-                except Empty:
-                    break
+        while True:
+            try:
+                self._offload_results.get_nowait()
+            except Empty:
+                break
+        while True:
+            try:
+                self._completed_loads.get_nowait()
+            except Empty:
+                break
         self.layer_done_counter.reset()
 
     def close(self) -> None:
