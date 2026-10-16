@@ -1022,8 +1022,6 @@ class Req(ReqDllmMixin):
         # Tokens loaded from storage backend (L3) during prefetch for this request
         self.storage_hit_length = 0
         self.host_loaded_length = 0
-        # Absolute external-cache hit boundary shared by PP0; None outside PP.
-        self.external_cache_hit_length: Optional[int] = None
         # The node to lock until for swa radix tree lock ref
         self.swa_uuid_for_lock: Optional[int] = None
         # Whether the prefill-time SWA tree lock has been released early
