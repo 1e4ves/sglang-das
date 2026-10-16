@@ -4,10 +4,6 @@ import threading
 from itertools import count
 
 
-class SourceTransferUnresolved(RuntimeError):
-    """The synchronous call returned a failure code without completion proof."""
-
-
 class _SourceOp:
     def __init__(self, token, room, generation, chunk, queue):
         self.token = token
@@ -130,20 +126,16 @@ class SourceDrainTracker:
             return True
 
     def run(self, fn, *args, success=None):
-        """Track a synchronous call whose invocation has returned."""
         op = getattr(self._context, "op", None)
         if op is None:
             raise RuntimeError("Source access outside a tracked transfer")
         hazard = object()
         with self.lock:
             op.hazards.add(hazard)
-        try:
-            result = fn(*args)
-        finally:
+        result = fn(*args)
+        if success is None or success(result):
             with self.lock:
-                op.hazards.discard(hazard)
-        if success is not None and not success(result):
-            raise SourceTransferUnresolved("Synchronous transfer did not complete")
+                op.hazards.remove(hazard)
         return result
 
     def submit(self, executor, fn, *args):
@@ -161,13 +153,22 @@ class SourceDrainTracker:
         hazard = object()
         with self.lock:
             op.hazards.add(hazard)
-            try:
-                future = executor.submit(invoke)
-            finally:
-                op.hazards.discard(hazard)
+        future = executor.submit(invoke)
         with self.lock:
             op.futures.add(future)
-        future.add_done_callback(lambda _: self.finish_quiesced(op.chunk))
+            op.hazards.remove(hazard)
+        def on_done(done):
+            if not done.cancelled():
+                try:
+                    failed = done.exception() is not None
+                except BaseException:
+                    failed = True
+                if failed:
+                    with self.lock:
+                        op.hazards.add(done)
+            self.finish_quiesced(op.chunk)
+
+        future.add_done_callback(on_done)
         return future
 
     def attach_futures(self, chunk, futures):
