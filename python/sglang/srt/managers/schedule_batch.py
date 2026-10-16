@@ -1280,10 +1280,6 @@ class Req(ReqDllmMixin):
         # At-rest device-resident prefix end, snapshotted on the request's
         # first prefill batch; the cached-prefix early-send never goes past it.
         self.early_send_prefix_end: Optional[int] = None
-        # Upper bound on radix prefix reuse for DSpark PD-hidden requests.
-        # Set at bootstrap to the decode-committed prefix; see
-        # _compute_max_prefix_len.
-        self.pd_hidden_max_prefix_len: Optional[int] = None
         self.metadata_buffer_index: int = -1
         # Used in overlap sequence to signal that an optimistic request should
         # abort chunking. Set in create_sender, consumed in process_batch_result.
@@ -1498,8 +1494,6 @@ class Req(ReqDllmMixin):
         # DSpark PD ships hidden states for [decode prefix, end). A reused
         # prefix is never forwarded, so it yields no hidden rows; matching past
         # the decode-committed prefix would leave holes that abort the transfer.
-        if self.pd_hidden_max_prefix_len is not None:
-            max_prefix_len = min(max_prefix_len, self.pd_hidden_max_prefix_len)
         return max(max_prefix_len, 0)
 
     # Based on https://github.com/vllm-project/vllm/blob/7a64d24aad69e4d2548aa0bf528d9fe63428ab01/vllm/transformers_utils/detokenizer.py#L194-L313

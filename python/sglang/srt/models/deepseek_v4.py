@@ -3234,13 +3234,7 @@ class DeepseekV4Model(nn.Module):
         else:
             input_ids_global = input_ids
 
-        # PD disaggregation drives the capture set per batch; fall back to the
-        # model-level set for the non-disaggregated path.
-        dspark_layers_to_capture = getattr(
-            forward_batch, "pd_hidden_capture_layer_ids", None
-        )
-        if dspark_layers_to_capture is None:
-            dspark_layers_to_capture = self.dspark_layers_to_capture
+        dspark_layers_to_capture = self.dspark_layers_to_capture
         capture_dspark = dspark_layers_to_capture is not None
         # Under CP-v2 the body returns rank-local hidden/aux rows; the CP runner
         # gathers them and finishes through DeepseekV4ForCausalLM.logits_from_body_output.
@@ -3583,21 +3577,10 @@ class DeepseekV4ForCausalLM(nn.Module):
         """
         aux_hidden_states = None
         pd_aux_hidden_states = None
-        has_pd_hidden_capture = (
-            getattr(forward_batch, "pd_hidden_capture_layer_ids", None) is not None
-        )
-        if has_pd_hidden_capture:
-            hidden_states, pd_aux_hidden_states = hidden_states
-            if self.capture_aux_hidden_states:
-                aux_hidden_states = pack_aux_hidden_states(pd_aux_hidden_states)
-        elif self.capture_aux_hidden_states:
+        if self.capture_aux_hidden_states:
             hidden_states, captured_aux_hidden_states = hidden_states
             aux_hidden_states = pack_aux_hidden_states(captured_aux_hidden_states)
-            # Eager/static forward-batch wrappers can preserve the global
-            # DSpark capture plan while omitting the per-request PD marker.
-            # A PD prefill target still has to expose those captured layers to
-            # the transfer path instead of relying on LogitsProcessor's request
-            # capture mode to retain them.
+            # DSpark consumes the captured target layers to populate draft KV.
             if self.model.dspark_layers_to_capture is not None:
                 pd_aux_hidden_states = captured_aux_hidden_states
         hidden_states, pre_hc_head = hidden_states
@@ -3612,12 +3595,8 @@ class DeepseekV4ForCausalLM(nn.Module):
                 None if aux_hidden_states is not None else pre_hc_head
             ),
         )
-        if pd_aux_hidden_states is not None and (
-            has_pd_hidden_capture
-            or self.model.dspark_layers_to_capture is not None
-        ):
-            # PD hidden transfer must use the requested target-layer captures,
-            # even when CaptureHiddenMode.FULL also populated final-layer state.
+        if pd_aux_hidden_states is not None:
+            # Expose the target-layer captures required by the draft KV injector.
             packed_pd_aux_hidden = pack_aux_hidden_states(pd_aux_hidden_states)
             logits_output.hidden_states = (
                 packed_pd_aux_hidden.flatten(1)

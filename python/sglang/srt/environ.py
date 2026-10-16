@@ -515,9 +515,6 @@ class Envs:
     # Force the DSpark draft's SlimQuant W4A8 MoE method to a selected backend
     # without changing the target model's W4A8 or generic MoE backend.
     SGLANG_DSPARK_FORCE_W4A8_TPMOE_BACKEND = EnvStr(None)
-    # PD hidden-state receive pool size, in tokens (-1 = derive from the
-    # decode-side chunk budget).
-    SGLANG_PD_HIDDEN_RECV_POOL_TOKENS = EnvInt(-1)
 
     # ===================================================================
     # Memory pools and KV-cache sizing

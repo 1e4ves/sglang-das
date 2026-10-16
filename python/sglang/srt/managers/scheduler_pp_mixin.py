@@ -23,10 +23,6 @@ import torch
 import torch.distributed
 
 from sglang.srt.disaggregation.base.conn import KVPoll
-from sglang.srt.disaggregation.hidden_state import (
-    get_pd_hidden_capture_layer_ids,
-    get_pd_hidden_req_state as pd_hidden_state,
-)
 from sglang.srt.disaggregation.utils import poll_and_all_reduce_attn_cp_tp_group
 from sglang.srt.distributed.communication_op import attn_cp_tp_broadcast_pyobj
 from sglang.srt.distributed.parallel_state import P2PWork
@@ -44,7 +40,6 @@ from sglang.srt.model_executor.forward_batch_info import (
     ForwardMode,
     PPProxyTensors,
 )
-from sglang.srt.model_executor.input_buffers import get_pp_proxy_hidden_states_shape
 from sglang.srt.observability.req_time_stats import set_time_batch
 from sglang.srt.runtime_context import get_disagg, get_parallel
 from sglang.srt.sampling.sampling_observer_pp import (
@@ -877,13 +872,6 @@ class SchedulerPPMixin:
             else None
         )
         add_auxiliary_output_to_pp_tensors(tensor_dict, auxiliary_output)
-        if (
-            get_pd_hidden_capture_layer_ids(batch.reqs)
-            and not self._pp_should_owner_direct_pd_hidden(batch)
-            and result.logits_output is not None
-            and result.logits_output.hidden_states is not None
-        ):
-            tensor_dict["pd_aux_hidden_states_0"] = result.logits_output.hidden_states
         return tensor_dict
 
     def _pp_prepare_proxy_tensor_dict_for_send(
@@ -893,56 +881,6 @@ class SchedulerPPMixin:
         if not result.can_run_cuda_graph:
             return tensor_dict
         return {name: tensor.clone() for name, tensor in tensor_dict.items()}
-    def _pp_should_owner_direct_pd_hidden(
-        self: Scheduler, batch: ScheduleBatch
-    ) -> bool:
-        if batch and batch.spec_algorithm.is_dspark():
-            return False
-        if not hasattr(self, "disagg_prefill_bootstrap_queue"):
-            return False
-        if not batch or not get_pd_hidden_capture_layer_ids(batch.reqs):
-            return False
-        capture_reqs = [
-            req
-            for req in batch.reqs
-            if pd_hidden_state(req).capture_layer_ids
-        ]
-        if not capture_reqs:
-            return False
-        if any(req.pending_bootstrap for req in capture_reqs):
-            return False
-        return all(
-            bool((pd_hidden_state(req).meta or {}).get("streaming_hidden", False))
-            for req in capture_reqs
-        )
-
-    def _pp_strip_pd_aux_hidden_from_proxy(
-        self: Scheduler, result: GenerationBatchResult
-    ) -> None:
-        proxy = result.pp_hidden_states_proxy_tensors
-        if proxy is None:
-            return
-        tensors = proxy.tensors
-        aux_keys = [
-            key for key in tensors if key.startswith("pd_aux_hidden_states_")
-        ]
-        for key in aux_keys:
-            tensors.pop(key, None)
-
-    def _pp_maybe_send_dspark_owner_direct_hidden(
-        self: Scheduler,
-        batch: ScheduleBatch,
-        result: GenerationBatchResult,
-    ) -> None:
-        if not self._pp_should_owner_direct_pd_hidden(batch):
-            return
-        send_owner_direct = getattr(
-            self, "send_dspark_owner_direct_hidden_for_batch", None
-        )
-        if send_owner_direct is None:
-            return
-        if send_owner_direct(batch, result):
-            self._pp_strip_pd_aux_hidden_from_proxy(result)
 
     def _pp_send_dict_to_next_stage(
         self: Scheduler,
@@ -1253,7 +1191,6 @@ class SchedulerPPMixin:
                 finally:
                     if cur_batch.spec_algorithm.is_dspark():
                         self.model_worker.set_pp_proxy_tensors_for_next_forward(None)
-                self._pp_maybe_send_dspark_owner_direct_hidden(cur_batch, result)
                 set_time_batch(
                     cur_batch.reqs,
                     "set_run_batch_cpu_end_time",

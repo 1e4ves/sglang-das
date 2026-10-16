@@ -29,9 +29,9 @@ import math
 import time
 from collections import deque
 from concurrent.futures import Future
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import torch
@@ -42,10 +42,6 @@ from sglang.srt.constants import GPU_MEMORY_TYPE_KV_CACHE
 from sglang.srt.disaggregation.base import KVPoll
 from sglang.srt.disaggregation.base.conn import StateType
 from sglang.srt.disaggregation.common.conn import CommonKVManager, CommonKVReceiver
-from sglang.srt.disaggregation.common.utils import (
-    PDHiddenChunk,
-    PDHiddenRequestState,
-)
 from sglang.srt.disaggregation.decode_hicache_mixin import (
     DecodeHiCachePreallocMixin,
     DecodeHiCacheTransferMixin,
@@ -71,7 +67,6 @@ from sglang.srt.disaggregation.utils import (
     prepare_abort,
     setup_state_kv_args,
 )
-from sglang.srt.distributed.utils import get_pp_indices
 from sglang.srt.environ import envs
 from sglang.srt.managers.schedule_batch import (
     FINISH_ABORT,
@@ -293,7 +288,6 @@ class HybridMambaDecodeReqToTokenPool(HybridReqToTokenPool):
         self.mamba_allocator.clear()
 
 
-
 @dataclass
 class DecodeRequest:
     req: Req
@@ -301,13 +295,6 @@ class DecodeRequest:
     waiting_for_input: bool = False
     metadata_buffer_index: int = -1
     is_rebootstrap: bool = False
-    pd_hidden_dst_indices: Optional[List[int]] = None
-    pd_hidden_dst_indices_by_pp: Optional[Dict[int, List[int]]] = None
-    pd_hidden_pp_slices: Optional[Dict[int, dict]] = None
-    pd_hidden_start: int = 0
-    pd_hidden_state: PDHiddenRequestState = field(
-        default_factory=PDHiddenRequestState.disabled
-    )
 
     # HiCache Status
     prefix_match: Optional[DecodePrefixMatch] = None
@@ -388,7 +375,6 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
         self._max_ensure_retries: int = 15  # scheduling cycles
         self._ensure_last_attempt_time: Dict[str, float] = {}
         self._ensure_retry_interval: float = 1.0  # seconds
-        self._last_pd_hidden_recv_credit_warning_time = 0.0
         # Retracted requests staged for rebootstrap while generation is paused.
         # Enqueued into ``self.queue`` only on ``continue_generation`` so the
         # prefix KV is recomputed under the post-retract (updated) weights.
@@ -403,7 +389,6 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
                 "(e.g. GQA, MHA). MLA models should not set this flag."
             )
         self.kv_manager = self._init_kv_manager()
-        self.transfer_queue.kv_manager = self.kv_manager
         if self.enable_staging:
             self.transfer_queue._init_staging_handler(self.kv_manager)
 
@@ -424,7 +409,6 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
             and self.token_to_kv_pool_allocator.page_size > 1
             and hasattr(self.token_to_kv_pool_allocator, "alloc_extend_swa_tail")
         )
-
 
     def _reclaim_swa_tail_capacity(
         self, swa_tail_len: int, req_id: str
@@ -691,7 +675,6 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
             self.draft_token_to_kv_pool,
             total_kv_layers=self.scheduler.model_config.num_hidden_layers,
             req_to_token_pool=getattr(self, "req_to_token_pool", None),
-            pd_hidden_pool=getattr(self.metadata_buffers, "pd_hidden_pool", None),
         )
 
         kv_args.ib_device = get_disagg().disaggregation_ib_device
@@ -799,9 +782,6 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
         req = decode_req.req
         if req.kv.holds_kv or req.kv.holds_mamba:
             release_kv_cache(req, self.tree_cache, checkpoint=False)
-        transfer_queue = getattr(self, "transfer_queue", None)
-        if transfer_queue is not None:
-            transfer_queue._release_pd_hidden_rows(decode_req)
         idx = decode_req.metadata_buffer_index
         if idx is not None and idx != -1:
             self.req_to_metadata_buffer_idx_allocator.free(idx)
@@ -1410,9 +1390,6 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
                     )
                 decode_req.kv_receiver.clear()
                 decode_req.kv_receiver = None
-                transfer_queue = getattr(self, "transfer_queue", None)
-                if transfer_queue is not None:
-                    transfer_queue._release_pd_hidden_rows(decode_req)
                 failed_reqs.append(decode_req)
                 indices_to_remove.add(i)
 
@@ -1627,248 +1604,12 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
                     indices_to_remove.add(i)
                     continue
 
-            pd_hidden_dst_indices = None
-            pd_hidden_dst_indices_by_pp = None
-            pd_hidden_pp_slices = None
-            pd_hidden_start = total_prefix_len
-            pd_hidden_len = origin_input_len - total_prefix_len
-            state_types = self.kv_manager.kv_args.state_types
-            if (
-                self.scheduler.spec_algorithm.is_dspark()
-                and not _is_fake_transfer(decode_req.req)
-                and StateType.PD_HIDDEN in state_types
-                and pd_hidden_len > 0
-            ):
-                dspark_pool = getattr(self.metadata_buffers, "pd_hidden_pool", None)
-                if dspark_pool is None:
-                    message = (
-                        "PD decode requires a hidden row pool for hidden metadata "
-                        "transfer, but none was initialized."
-                    )
-                    logger.error(message)
-                    prepare_abort(
-                        decode_req.req,
-                        message,
-                        status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-                    )
-                    self.scheduler.output_streamer.stream_output(
-                        [decode_req.req], decode_req.req.return_logprob
-                    )
-                    if prefix_len > 0:
-                        self.tree_cache.dec_lock_ref(decode_req.req.last_node)
-                    failed_reqs.append(decode_req)
-                    indices_to_remove.add(i)
-                    continue
-
-                model_runner = self.scheduler.tp_worker.model_runner
-                spec_aux_config = getattr(model_runner, "spec_aux_config", None)
-                target_layer_ids = (
-                    getattr(model_runner, "dflash_or_dspark_target_layer_ids", None)
-                    or getattr(spec_aux_config, "dflash_target_layer_ids", None)
-                    or []
-                )
-                target_layer_ids = [int(x) for x in target_layer_ids]
-                if not target_layer_ids:
-                    message = (
-                        "PD decode could not infer target layer ids for hidden "
-                        "hidden transfer."
-                    )
-                    logger.error(message)
-                    prepare_abort(
-                        decode_req.req,
-                        message,
-                        status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-                    )
-                    self.scheduler.output_streamer.stream_output(
-                        [decode_req.req], decode_req.req.return_logprob
-                    )
-                    if prefix_len > 0:
-                        self.tree_cache.dec_lock_ref(decode_req.req.last_node)
-                    failed_reqs.append(decode_req)
-                    indices_to_remove.add(i)
-                    continue
-
-                target_pp_ranks = list(
-                    getattr(decode_req.kv_receiver, "target_pp_ranks", None) or [0]
-                )
-                pp_size = max(target_pp_ranks) + 1 if target_pp_ranks else 1
-                pp_slices = {}
-                slice_start = 0
-                for pp_rank in range(pp_size):
-                    pp_start, pp_end = get_pp_indices(
-                        self.scheduler.model_config.num_hidden_layers,
-                        pp_rank,
-                        pp_size,
-                    )
-                    local_layer_ids = [
-                        layer_id
-                        for layer_id in target_layer_ids
-                        if pp_start <= layer_id < pp_end
-                    ]
-                    slice_len = len(local_layer_ids) * int(
-                        self.scheduler.model_config.hidden_size
-                    )
-                    pp_slices[pp_rank] = {
-                        "pp_rank": int(pp_rank),
-                        "layer_ids": [int(x) for x in local_layer_ids],
-                        "slice_start": int(slice_start),
-                        "slice_len": int(slice_len),
-                        "dst_indices": [],
-                    }
-                    slice_start += slice_len
-                if slice_start != len(target_layer_ids) * int(
-                    self.scheduler.model_config.hidden_size
-                ):
-                    message = (
-                        "PD hidden PP slice layout does not cover all target layers: "
-                        f"target_layer_ids={target_layer_ids}, pp_size={pp_size}"
-                    )
-                    logger.error(message)
-                    prepare_abort(
-                        decode_req.req,
-                        message,
-                        status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-                    )
-                    self.scheduler.output_streamer.stream_output(
-                        [decode_req.req], decode_req.req.return_logprob
-                    )
-                    if prefix_len > 0:
-                        self.tree_cache.dec_lock_ref(decode_req.req.last_node)
-                    failed_reqs.append(decode_req)
-                    indices_to_remove.add(i)
-                    continue
-
-                non_empty_slices = [
-                    (int(pp_rank), pp_slice)
-                    for pp_rank, pp_slice in pp_slices.items()
-                    if int(pp_slice.get("slice_len", 0)) > 0
-                ]
-                full_hidden_size = int(dspark_pool.hidden_size)
-                fixed_pool_supported = (
-                    len(non_empty_slices) == 1
-                    and int(non_empty_slices[0][1].get("slice_start", 0)) == 0
-                    and int(non_empty_slices[0][1].get("slice_len", 0))
-                    == full_hidden_size
-                )
-                if not fixed_pool_supported:
-                    message = (
-                        "PD fixed decode hidden row pool requires the current "
-                        "PP layout to have exactly one non-empty slice covering the "
-                        "full hidden width. Split target layers across PP ranks are "
-                        "not supported yet: "
-                        f"rid={decode_req.req.rid}, pp_slices={pp_slices}"
-                    )
-                    logger.error(message)
-                    prepare_abort(
-                        decode_req.req,
-                        message,
-                        status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-                    )
-                    self.scheduler.output_streamer.stream_output(
-                        [decode_req.req], decode_req.req.return_logprob
-                    )
-                    if prefix_len > 0:
-                        self.tree_cache.dec_lock_ref(decode_req.req.last_node)
-                    failed_reqs.append(decode_req)
-                    indices_to_remove.add(i)
-                    continue
-
-                pd_hidden_streaming = (
-                    not _is_hcu
-                    and self.kv_manager.supports_pd_hidden_streaming()
-                    and hasattr(self.scheduler.draft_worker, "inject_pd_hidden_chunk")
-                )
-                # Mooncake's streaming READY/ACK protocol is not available on
-                # HCU yet.  Keep the upstream streaming path on CUDA, and use
-                # the existing full hidden-row transfer representation on HCU.
-                # The full rows are injected into the draft cache after the KV
-                # receiver reports success (see _inject_full_pd_hidden).
-                pd_hidden_window_rows = (
-                    min(pd_hidden_len, dspark_pool.size)
-                    if pd_hidden_streaming
-                    else pd_hidden_len
-                )
-                if pd_hidden_window_rows <= 0:
-                    message = (
-                        "PD decode hidden receive pool has no streaming rows: "
-                        f"rid={decode_req.req.rid}, hidden_len={pd_hidden_len}, "
-                        f"pool_size={dspark_pool.size}. Increase "
-                        "SGLANG_PD_HIDDEN_RECV_POOL_TOKENS."
-                    )
-                    logger.error(message)
-                    prepare_abort(
-                        decode_req.req,
-                        message,
-                        status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-                    )
-                    self.scheduler.output_streamer.stream_output(
-                        [decode_req.req], decode_req.req.return_logprob
-                    )
-                    if prefix_len > 0:
-                        self.tree_cache.dec_lock_ref(decode_req.req.last_node)
-                    failed_reqs.append(decode_req)
-                    indices_to_remove.add(i)
-                    continue
-                allocated_hidden_indices = dspark_pool.alloc(pd_hidden_window_rows)
-                if allocated_hidden_indices is None:
-                    if prefix_len > 0:
-                        self.tree_cache.dec_lock_ref(decode_req.req.last_node)
-                    now = time.monotonic()
-                    if (
-                        now - self._last_pd_hidden_recv_credit_warning_time
-                        > 30
-                    ):
-                        logger.warning(
-                            "PD decode hidden pool blocked prealloc: "
-                            "rid=%s window_rows=%d hidden_len=%d free_rows=%d pool_rows=%d "
-                            "prealloc_queue=%d transfer_queue=%d",
-                            decode_req.req.rid,
-                            pd_hidden_window_rows,
-                            pd_hidden_len,
-                            dspark_pool.available_size(),
-                            dspark_pool.size,
-                            len(self.queue),
-                            len(self.transfer_queue.queue),
-                        )
-                        self._last_pd_hidden_recv_credit_warning_time = now
-                    continue
-
-                pd_hidden_dst_indices_by_pp = {}
-                for pp_rank, pp_slice in pp_slices.items():
-                    if int(pp_slice.get("slice_len", 0)) <= 0:
-                        pp_slice["dst_indices"] = []
-                        pd_hidden_dst_indices_by_pp[int(pp_rank)] = []
-                        continue
-                    pp_slice["dst_indices"] = [
-                        int(x) for x in allocated_hidden_indices
-                    ]
-                    pd_hidden_dst_indices_by_pp[int(pp_rank)] = [
-                        int(x) for x in allocated_hidden_indices
-                    ]
-                pd_hidden_pp_slices = pp_slices
-                hidden_end = int(pd_hidden_start + pd_hidden_len)
-                decode_req.pd_hidden_state = (
-                    PDHiddenRequestState.streaming_state(
-                        int(pd_hidden_start), hidden_end
-                    )
-                    if pd_hidden_streaming
-                    else PDHiddenRequestState.full(
-                        int(pd_hidden_start), hidden_end
-                    )
-                )
-                if pp_size == 1:
-                    pd_hidden_dst_indices = pd_hidden_dst_indices_by_pp.get(0)
-
             dst_kv_indices = self._pre_alloc(
                 decode_req.req,
                 prefix_indices,
                 prefix_len,
                 total_prefix_len,
             )
-            decode_req.pd_hidden_dst_indices = pd_hidden_dst_indices
-            decode_req.pd_hidden_dst_indices_by_pp = pd_hidden_dst_indices_by_pp
-            decode_req.pd_hidden_pp_slices = pd_hidden_pp_slices
-            decode_req.pd_hidden_start = pd_hidden_start
             decode_req.prefix_match = prefix_match
             if self.scheduler.enable_decode_hicache:
                 self._start_hicache_prefetch(decode_req.req, prefix_match)
@@ -1988,15 +1729,7 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
                 StateType.BLOCK_SCALE_SWA: _swa_payload,
             }
 
-            def _pd_hidden_payload():
-                if not pd_hidden_dst_indices_by_pp:
-                    return None
-                first_slice_indices = next(
-                    iter(pd_hidden_dst_indices_by_pp.values())
-                )
-                return np.asarray(first_slice_indices, dtype=np.int32)
 
-            payloads[StateType.PD_HIDDEN] = _pd_hidden_payload
             if hasattr(self.req_to_token_pool, "req_to_token_c4"):
                 # DSV4 on NPU: per-pool dst page indices, produced by the same
                 # shared builder prefill uses so src/dst line up positionally.
@@ -2027,54 +1760,6 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
                 idx is not None and len(idx) > 0 for idx in state_indices
             ):
                 state_indices = None
-
-            spec_metadata = None
-            if pd_hidden_dst_indices_by_pp is not None:
-                model_runner = self.scheduler.tp_worker.model_runner
-                spec_aux_config = getattr(model_runner, "spec_aux_config", None)
-                target_layer_ids = (
-                    getattr(model_runner, "dflash_or_dspark_target_layer_ids", None)
-                    or getattr(spec_aux_config, "dflash_target_layer_ids", None)
-                    or []
-                )
-                spec_metadata = {
-                    "pd_hidden": True,
-                    "streaming_hidden": bool(decode_req.pd_hidden_state.streaming),
-                    "streaming_window_rows": int(
-                        max(
-                            (
-                                len(indices)
-                                for indices in (
-                                    pd_hidden_dst_indices_by_pp or {}
-                                ).values()
-                            ),
-                            default=0,
-                        )
-                    ),
-                    "decode_radix_cache_enabled": bool(
-                        self.scheduler.server_args.disaggregation_decode_enable_radix_cache
-                    ),
-                    "hidden_start": int(pd_hidden_start),
-                    "hidden_len": int(pd_hidden_len),
-                    "dst_indices": (
-                        [int(x) for x in pd_hidden_dst_indices]
-                        if pd_hidden_dst_indices is not None
-                        else []
-                    ),
-                    "pp_slices": {
-                        str(pp_rank): {
-                            **pp_slice,
-                            "dst_indices": [
-                                int(x) for x in pp_slice.get("dst_indices", [])
-                            ],
-                        }
-                        for pp_rank, pp_slice in (
-                            pd_hidden_pp_slices or {}
-                        ).items()
-                    },
-                    "hidden_size": int(self.metadata_buffers.pd_hidden_pool.hidden_size),
-                    "target_layer_ids": [int(x) for x in target_layer_ids],
-                }
 
             decode_req.metadata_buffer_index = (
                 self.req_to_metadata_buffer_idx_allocator.alloc()
@@ -2141,7 +1826,6 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
                 state_indices,
                 **metadata_kwargs,
                 decode_prefix_len=total_prefix_len,
-                spec_metadata=spec_metadata,
             )
             if decode_req.is_rebootstrap:
                 self.kv_manager.submit_prefill_recompute(
@@ -2652,11 +2336,6 @@ class DecodeTransferQueue(DecodeHiCacheTransferMixin):
     Store the requests that is polling kv
     """
 
-    # Class-level default: the prealloc queue wires this up after construction,
-    # so the PD-hidden hooks must tolerate it being unset -- getattr(None, ...)
-    # short-circuits them into a no-op instead of raising AttributeError.
-    kv_manager = None
-
     def __init__(
         self,
         gloo_group: ProcessGroup,
@@ -2685,7 +2364,6 @@ class DecodeTransferQueue(DecodeHiCacheTransferMixin):
         # Aborted-mid-transfer requests whose KV pages/slot are held until drained
         # or timed out. Entries: (decode_req, deadline, metadata_idx, required_acks).
         self._deferred_releases: List[Tuple[DecodeRequest, float, int, int]] = []
-        self.kv_manager = None
         self.locally_aborted_rids: Set[str] = set()
 
     def add(self, decode_req: DecodeRequest) -> None:
@@ -2828,7 +2506,6 @@ class DecodeTransferQueue(DecodeHiCacheTransferMixin):
         req = decode_req.req
         if req.kv.holds_kv or req.kv.holds_mamba:
             release_kv_cache(req, self.tree_cache, checkpoint=False)
-        self._release_pd_hidden_rows(decode_req)
         self._free_metadata_buffer(decode_req)
 
     def drop_by_rids(
@@ -2889,58 +2566,6 @@ class DecodeTransferQueue(DecodeHiCacheTransferMixin):
         )
         return rids
 
-    def _release_pd_hidden_rows(self, decode_req: DecodeRequest) -> None:
-        if getattr(self, "kv_manager", None) is None:
-            # PD hidden transfer was never wired up on this queue; nothing to
-            # release, and decode_req carries no pd_hidden_* bookkeeping.
-            return
-        wait_ack_completions = getattr(
-            self.kv_manager, "wait_pd_hidden_ack_completions", None
-        )
-        if wait_ack_completions is not None and not wait_ack_completions(
-            decode_req.req.bootstrap_room
-        ):
-            logger.error(
-                "Timed out waiting for PD hidden ACK completion before "
-                "releasing receive rows: rid=%s room=%s",
-                decode_req.req.rid,
-                decode_req.req.bootstrap_room,
-            )
-            return
-        pop_acked_chunks = getattr(
-            self.kv_manager, "pop_pd_hidden_acked_chunks", None
-        )
-        if pop_acked_chunks is not None:
-            pop_acked_chunks(decode_req.req.bootstrap_room)
-        indices_by_pp = decode_req.pd_hidden_dst_indices_by_pp
-        indices = decode_req.pd_hidden_dst_indices
-        pool = getattr(self.metadata_buffers, "pd_hidden_pool", None)
-        if pool is not None:
-            if indices_by_pp is not None:
-                seen = set()
-                for pp_indices in indices_by_pp.values():
-                    key = tuple(int(idx) for idx in pp_indices)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    pool.free(pp_indices)
-            elif indices is not None:
-                pool.free(indices)
-        decode_req.pd_hidden_dst_indices = None
-        decode_req.pd_hidden_dst_indices_by_pp = None
-        decode_req.pd_hidden_pp_slices = None
-        decode_req.pd_hidden_state.reset()
-
-    def _consume_pd_hidden_acked_chunks(self, decode_req: DecodeRequest) -> None:
-        pop_acked_chunks = getattr(
-            self.kv_manager, "pop_pd_hidden_acked_chunks", None
-        )
-        if pop_acked_chunks is None:
-            return
-        for chunk in pop_acked_chunks(decode_req.req.bootstrap_room):
-            if chunk.get("is_last_hidden_chunk"):
-                decode_req.pd_hidden_state.mark_hidden_done()
-
     def _commit_transfer_to_req(self, decode_req: DecodeRequest):
         idx = decode_req.metadata_buffer_index
         metadata = self.metadata_buffers.get_buf(idx)
@@ -2987,7 +2612,6 @@ class DecodeTransferQueue(DecodeHiCacheTransferMixin):
             )
             decode_req.kv_receiver.clear()
             decode_req.kv_receiver = None
-            self._release_pd_hidden_rows(decode_req)
             return
         elif actual_room != expected_room:
             # Real corruption detected (mismatch)
@@ -3007,7 +2631,6 @@ class DecodeTransferQueue(DecodeHiCacheTransferMixin):
             )
             decode_req.kv_receiver.clear()
             decode_req.kv_receiver = None
-            self._release_pd_hidden_rows(decode_req)
             return
 
         self._commit_hicache_local_restore_to_req(decode_req)
@@ -3118,123 +2741,6 @@ class DecodeTransferQueue(DecodeHiCacheTransferMixin):
             metadata_buffers=self.metadata_buffers,
         )
 
-    def _drain_pd_hidden_ready_chunks(self, decode_req: DecodeRequest) -> None:
-        # Requests that never entered the PD-hidden path carry no state object.
-        hidden_state = getattr(decode_req, "pd_hidden_state", None)
-        if hidden_state is None or not hidden_state.streaming:
-            return
-        pop_chunks = getattr(self.kv_manager, "pop_pd_hidden_ready_chunks", None)
-        if pop_chunks is None:
-            raise RuntimeError(
-                "PD streaming hidden backend is missing ready chunk API."
-            )
-        chunks = pop_chunks(decode_req.req.bootstrap_room)
-        if not chunks:
-            return
-        dspark_pool = getattr(self.metadata_buffers, "pd_hidden_pool", None)
-        if dspark_pool is None:
-            raise RuntimeError("PD hidden row pool disappeared on decode.")
-        inject_chunk = getattr(
-            self.scheduler.draft_worker, "inject_pd_hidden_chunk", None
-        )
-        if inject_chunk is None:
-            raise RuntimeError(
-                "PD streaming hidden requires draft_worker.inject_pd_hidden_chunk."
-            )
-        sorted_chunks = sorted(chunks, key=lambda item: int(item["hidden_start"]))
-        for chunk in sorted_chunks:
-            hidden_chunk = PDHiddenChunk(
-                room=int(chunk["room"]),
-                prefill_rank=int(chunk["prefill_rank"]),
-                hidden_start=int(chunk["hidden_start"]),
-                row_len=int(chunk.get("row_len", len(chunk.get("dst_indices", [])))),
-                is_last_hidden_chunk=bool(chunk.get("is_last_hidden_chunk", False)),
-                dst_indices=[int(x) for x in chunk.get("dst_indices", [])],
-                ack_host=chunk.get("ack_host"),
-                ack_port=int(chunk["ack_port"]) if "ack_port" in chunk else None,
-            )
-            if hidden_chunk.row_len <= 0:
-                continue
-            if len(hidden_chunk.dst_indices) != hidden_chunk.row_len:
-                raise RuntimeError(
-                    "PD hidden chunk dst index length mismatch: "
-                    f"rid={decode_req.req.rid}, row_len={hidden_chunk.row_len}, "
-                    f"dst_indices={len(hidden_chunk.dst_indices)}"
-                )
-            chunk_status = hidden_state.accept_chunk(
-                hidden_chunk, defer_hidden_done=True
-            )
-            if chunk_status == "future":
-                raise RuntimeError(
-                    "PD streaming hidden chunk arrived out of order: "
-                    f"rid={decode_req.req.rid}, "
-                    f"expected_start={hidden_state.next_start}, "
-                    f"chunk_start={hidden_chunk.hidden_start}, "
-                    f"row_len={hidden_chunk.row_len}"
-                )
-            if chunk_status == "stale":
-                raise RuntimeError(
-                    "PD streaming hidden chunk arrived out of order: "
-                    f"rid={decode_req.req.rid}, "
-                    f"expected_start={hidden_state.next_start}, "
-                    f"chunk_start={hidden_chunk.hidden_start}, "
-                    f"row_len={hidden_chunk.row_len}"
-                )
-            read_hidden = getattr(dspark_pool, "read_view", dspark_pool.read)
-            hidden = read_hidden(hidden_chunk.dst_indices)
-            event = inject_chunk(
-                decode_req.req,
-                hidden,
-                hidden_chunk.hidden_start,
-            )
-            submit_ack = getattr(
-                self.kv_manager, "submit_pd_hidden_chunk_ack", None
-            )
-            if submit_ack is None:
-                raise RuntimeError(
-                    "PD streaming hidden backend is missing ACK completion API."
-                )
-            if hidden_chunk.ack_host is None or hidden_chunk.ack_port is None:
-                raise RuntimeError(
-                    "PD streaming hidden chunk is missing ACK endpoint: "
-                    f"rid={decode_req.req.rid}, "
-                    f"hidden_start={hidden_chunk.hidden_start}"
-                )
-            submit_ack(
-                event=event,
-                remote=hidden_chunk.ack_host,
-                dst_port=int(hidden_chunk.ack_port),
-                room=int(hidden_chunk.room),
-                prefill_rank=int(hidden_chunk.prefill_rank),
-                hidden_start=int(hidden_chunk.hidden_start),
-                is_last_hidden_chunk=hidden_chunk.is_last_hidden_chunk,
-            )
-
-    def _inject_full_pd_hidden(self, decode_req: DecodeRequest) -> None:
-        """Inject a non-streaming PD hidden transfer into the DSpark draft KV."""
-        hidden_state = decode_req.pd_hidden_state
-        if not hidden_state.enabled or hidden_state.streaming:
-            return
-        indices = decode_req.pd_hidden_dst_indices
-        if indices is None and decode_req.pd_hidden_dst_indices_by_pp:
-            indices = next(iter(decode_req.pd_hidden_dst_indices_by_pp.values()))
-        if not indices:
-            return
-        pool = getattr(self.metadata_buffers, "pd_hidden_pool", None)
-        if pool is None:
-            raise RuntimeError("PD hidden row pool disappeared on decode.")
-        inject_chunk = getattr(self.scheduler.draft_worker, "inject_pd_hidden_chunk", None)
-        if inject_chunk is None:
-            raise RuntimeError(
-                "PD full hidden transfer requires draft_worker.inject_pd_hidden_chunk."
-            )
-        read_hidden = getattr(pool, "read_view", None) or pool.read
-        hidden = read_hidden(indices)
-        event = inject_chunk(decode_req.req, hidden, hidden_state.start)
-        if event is not None:
-            event.synchronize()
-        hidden_state.mark_hidden_done()
-
     def _init_staging_handler(self, kv_manager):
         """Create staging handler from kv_manager. Must be called exactly once."""
         from sglang.srt.disaggregation.common.staging_handler import (
@@ -3272,25 +2778,6 @@ class DecodeTransferQueue(DecodeHiCacheTransferMixin):
         for i, (decode_req, poll) in enumerate(zip(self.queue, polls)):
             if rids_to_check is not None and decode_req.req.rid not in rids_to_check:
                 continue
-            try:
-                self._consume_pd_hidden_acked_chunks(decode_req)
-                self._drain_pd_hidden_ready_chunks(decode_req)
-            except Exception as e:
-                error_message = (
-                    "PD hidden decode transfer failed while draining chunks: "
-                    f"rid={decode_req.req.rid}, room={decode_req.req.bootstrap_room}, "
-                    f"error={e}"
-                )
-                self.kv_manager.record_failure(
-                    decode_req.req.bootstrap_room,
-                    error_message,
-                )
-                self.kv_manager.update_status(
-                    decode_req.req.bootstrap_room,
-                    KVPoll.Failed,
-                )
-                poll = KVPoll.Failed
-
             hicache_restore_status = decode_req.hicache_restore_status
             if (
                 poll == KVPoll.Failed
@@ -3338,7 +2825,6 @@ class DecodeTransferQueue(DecodeHiCacheTransferMixin):
                 else:
                     # release pre-allocated kv cache, but don't insert into the tree since it's failed
                     release_kv_cache(decode_req.req, self.tree_cache, checkpoint=False)
-                    self._release_pd_hidden_rows(decode_req)
                     decode_req.kv_receiver.clear()
                     decode_req.kv_receiver = None
                     indices_to_remove.add(i)
@@ -3350,12 +2836,6 @@ class DecodeTransferQueue(DecodeHiCacheTransferMixin):
                     self.scheduler.enable_decode_hicache
                     and hicache_restore_status == HiCacheRestoreResult.PENDING
                 ):
-                    continue
-                hidden_state = decode_req.pd_hidden_state
-                hidden_state.mark_kv_done()
-                if hidden_state.enabled and not hidden_state.streaming:
-                    self._inject_full_pd_hidden(decode_req)
-                if not hidden_state.request_done():
                     continue
                 self._commit_transfer_to_req(decode_req)
                 indices_to_remove.add(i)
@@ -3400,7 +2880,6 @@ class DecodeTransferQueue(DecodeHiCacheTransferMixin):
             # instead of the stale value, avoiding a false-positive mismatch.
             self.metadata_buffers.bootstrap_room[idx] = 0
             self.req_to_metadata_buffer_idx_allocator.free(idx)
-            self._release_pd_hidden_rows(self.queue[i])
 
         self.queue = [
             entry for i, entry in enumerate(self.queue) if i not in indices_to_remove
@@ -3466,8 +2945,6 @@ class DecodeTransferQueue(DecodeHiCacheTransferMixin):
 
     def release_memory_occupation(self):
         """Clean up in-flight transfers before releasing GPU memory."""
-        for decode_req in self.queue:
-            self._release_pd_hidden_rows(decode_req)
         self.queue.clear()
         # Pool is being torn down; drop held entries without per-request release.
         self._deferred_releases.clear()

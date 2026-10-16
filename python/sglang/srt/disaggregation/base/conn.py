@@ -33,8 +33,6 @@ class StateType(str, enum.Enum):
     # KV it describes (whole sequence for full attention, window for SWA).
     BLOCK_SCALE = "block_scale"
     BLOCK_SCALE_SWA = "block_scale_swa"
-    # Target aux hidden rows used to bootstrap decode-side draft KV.
-    PD_HIDDEN = "pd_hidden"
 
 
 @dataclasses.dataclass
@@ -174,15 +172,6 @@ class BaseKVSender(ABC):
 
     def set_source_event(self, source_event) -> None:
         del source_event
-
-    def set_pd_hidden_chunk_meta(
-        self,
-        hidden_start: int,
-        row_len: int,
-        is_last_hidden_chunk: bool,
-        release_indices: Optional[List[int]] = None,
-    ) -> None:
-        del hidden_start, row_len, is_last_hidden_chunk, release_indices
 
     @abstractmethod
     def get_transfer_metric(self) -> KVTransferMetric:
