@@ -38,7 +38,6 @@ from sglang.srt.layers.attention.dsv4.metadata import (
     PagedIndexerMetadata,
 )
 from sglang.srt.layers.linear import ReplicatedLinear
-from sglang.srt.mem_cache.cp_cache_layer_split.pool_base import is_cp_cache_layer_split_pool
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.model_executor.runner_utils import get_is_capture_mode
 from sglang.srt.model_executor.runner_backend_utils.breakable_cuda_graph.context import (
@@ -737,9 +736,6 @@ class C4IndexerBackendMixin:
         c4_seq_lens: torch.Tensor,
         query_rows: int,
     ) -> Optional[NonPagedIndexerPlan]:
-        if is_cp_cache_layer_split_pool(getattr(self, "token_to_kv_pool", None)):
-            # Nonpaged gathering addresses the persistent pool directly.
-            return None
         if query_rows < envs.SGLANG_OPT_DSV4_NONPAGED_INDEXER_MIN_QUERY_TOKENS.get():
             return None
         if not self._can_use_nonpaged_indexer(
@@ -993,15 +989,6 @@ class C4IndexerBackendMixin:
             query_rows=query_rows,
         )
         indexer_page_table = page_table
-        if hasattr(token_to_kv_pool, "remap_indexer_page_table_for_read"):
-            indexer_page_table = token_to_kv_pool.remap_indexer_page_table_for_read(
-                c4_indexer.layer_id, indexer_page_table
-            )
-            indexer_page_table = match_num_queries(indexer_page_table, value=0)
-        else:
-            # Pre-LayerSplit invariant: backend builds indexer page table from
-            # the same source as core_attn_metadata.page_table.
-            assert indexer_metadata.page_table is core_metadata.page_table
         persistent_mqa_enabled = envs.SGLANG_MQA_PERSISTENT.get()
         graph_mqa_route = (
             indexer_metadata.use_prefill_cuda_graph
@@ -1165,9 +1152,9 @@ class C4IndexerBackendMixin:
                         else _c4sl
                     ),
                     (
-                        indexer_page_table.to(torch.int32).contiguous()
+                        page_table.to(torch.int32).contiguous()
                         if use_lightop
-                        else indexer_page_table
+                        else page_table
                     ),
                     None if use_lightop else indexer_metadata.deep_gemm_metadata,
                     indexer_metadata.max_c4_seq_len,
@@ -1185,6 +1172,7 @@ class C4IndexerBackendMixin:
                 )
                 self._dsv4_int8_indexer_path_logged = True
 
+        assert indexer_metadata.page_table is core_metadata.page_table
         if self.debug_use_external_c4_sparse_indices:
             return
 
