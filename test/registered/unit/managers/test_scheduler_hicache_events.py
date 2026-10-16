@@ -118,7 +118,8 @@ class TestSchedulerHiCacheEvents(unittest.TestCase):
         s.pp_group = SimpleNamespace(is_last_rank=True)
         s.running_mbs = [self.running_batch]
         s.last_mbs = [None]
-        s.ingest_requests = Mock(return_value=[])
+        s.request_receiver = SimpleNamespace(recv_requests=Mock(return_value=[]))
+        s.process_input_requests = Mock()
         s._pp_pd_get_bootstrapped_ids = Mock(return_value=[])
         s._pp_pd_get_prefill_transferred_ids = Mock(return_value=[])
         s._pp_commit_comm_work = Mock()
