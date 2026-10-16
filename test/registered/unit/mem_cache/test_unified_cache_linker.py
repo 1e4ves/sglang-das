@@ -5,6 +5,7 @@ from array import array
 from collections import defaultdict
 from dataclasses import replace
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import test_unified_radix_cache_unittest as shared_cache_suite
@@ -948,6 +949,41 @@ def test_linker_lifecycle_releases_private_index_references(operation):
     getattr(wrapper, operation)()
 
     assert wrapper.private_load_indices == {}
+
+
+@pytest.mark.parametrize("queued", [True, False])
+def test_load_back_keeps_tail_private_and_rolls_back_refusal(queued):
+    tail = torch.tensor([20, 21, 22, 23], dtype=torch.int64)
+    transfer = PoolTransfer(name=PoolName.KV, device_indices=tail, keys=["page"])
+    component = SimpleNamespace(
+        build_external_linker_transfer=MagicMock(return_value=transfer),
+        update_external_linker_load=MagicMock(return_value=None),
+    )
+    backend = _FakeLinker()
+    backend.load = MagicMock(return_value=queued)
+    cache = _cache_for_wrapper(
+        page_size=4, _components_tuple=(component,), insert=MagicMock()
+    )
+    wrapper = UnifiedCacheLinkerWrapper(cache, backend)
+    wrapper.hit_markers["rid"] = ExternalCacheHitMarker(["page"], 4)
+    req = SimpleNamespace(rid="rid", last_node=7, swa_branching_seqlen=8)
+
+    loaded_len, last_node = wrapper.load_back(req)
+
+    cache.insert.assert_not_called()
+    assert last_node == req.last_node == 7
+    phase = component.update_external_linker_load.call_args.args[0]
+    if queued:
+        assert loaded_len == 4
+        assert phase == ExternalLinkerLoadPhase.PREPARE
+        assert wrapper.private_load_indices["rid"] is tail
+        assert req.swa_branching_seqlen is None
+    else:
+        assert loaded_len == 0
+        assert phase == ExternalLinkerLoadPhase.ABORT
+        assert wrapper.private_load_indices == {}
+        assert wrapper.inflight_load_rids == []
+        assert req.swa_branching_seqlen == 8
 
 
 def test_release_request_cancels_queued_load():

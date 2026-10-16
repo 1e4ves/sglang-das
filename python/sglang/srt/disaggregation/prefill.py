@@ -1376,7 +1376,7 @@ class SchedulerDisaggregationPrefillMixin:
         needs_pd_hidden_reqs = [
             req
             for req in batch.reqs
-            if (
+            if req.discard_output_reason is None and (
                 (
                     pd_hidden_state(req).src_indices
                     or pd_hidden_state(req).capture_layer_ids
@@ -1417,6 +1417,8 @@ class SchedulerDisaggregationPrefillMixin:
             extend_len = int(extend_len)
             req_hidden = hidden_states[hidden_offset : hidden_offset + extend_len]
             hidden_offset += extend_len
+            if req.discard_output_reason is not None:
+                continue
 
             meta = pd_hidden_state(req).meta or {}
             streaming_hidden = bool(meta.get("streaming_hidden", False))

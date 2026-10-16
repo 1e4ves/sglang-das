@@ -59,6 +59,7 @@ from sglang.srt.disaggregation.kv_events import (
     BlockStoredWithMetadata,
     StorageMedium,
 )
+from sglang.srt.managers.schedule_batch import ReqKvInfo
 from sglang.srt.mem_cache.allocator.token import TokenToKVPoolAllocator
 from sglang.srt.mem_cache.base_prefix_cache import (
     EvictParams,

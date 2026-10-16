@@ -8,7 +8,7 @@ reaching the client is covered by scheduler/test_scheduler_control.py.
 import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from sglang.srt.environ import envs
 from sglang.test.ci.ci_register import register_cpu_ci

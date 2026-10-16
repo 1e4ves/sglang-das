@@ -797,7 +797,7 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
             except Exception:
                 pass
         req = decode_req.req
-        if req.req_pool_idx is not None or getattr(req, "mamba_pool_idx", None) is not None:
+        if req.kv.holds_kv or req.kv.holds_mamba:
             release_kv_cache(req, self.tree_cache, checkpoint=False)
         transfer_queue = getattr(self, "transfer_queue", None)
         if transfer_queue is not None:
@@ -1529,7 +1529,7 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
                         self._release_decode_radix_match(decode_req.req)
                     continue
 
-                decode_req.req.cache_protected_len = prefix_len
+                decode_req.req.kv.cache_protected_len = prefix_len
                 if locked_prefix_len > 0 and prefix_len == 0:
                     self._release_decode_radix_match(decode_req.req)
                     prefix_match = None
@@ -2826,7 +2826,7 @@ class DecodeTransferQueue(DecodeHiCacheTransferMixin):
                 pass
             decode_req.kv_receiver = None
         req = decode_req.req
-        if req.req_pool_idx is not None or getattr(req, "mamba_pool_idx", None) is not None:
+        if req.kv.holds_kv or req.kv.holds_mamba:
             release_kv_cache(req, self.tree_cache, checkpoint=False)
         self._release_pd_hidden_rows(decode_req)
         self._free_metadata_buffer(decode_req)
